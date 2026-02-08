@@ -21,7 +21,7 @@ UDP_PORTS_TO_MONITOR = {6672, 61455, 61456, 61457, 61458}
 # ============
 
 init(autoreset=True)
-TARGET_PROCESS_KEYWORDS = ["GTA5", "GTA5_Enhanced"]
+TARGET_PROCESS_KEYWORDS = ["GTA5", "GTA5_Enhanced", "RDR2"]
 
 # 官方服务器配置
 TRADE_SERVER_IPS = {"192.81.245.200", "192.81.245.201"}
@@ -273,7 +273,7 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
             simplified = "微软"
         elif "Amazon" in as_name or "AWS" in as_name:
             simplified = "AWS"
-        elif "Take-Two" in as_name or "Take Two" in as_name:
+        elif "Take-Two" in as_name or "Take Two" in as_name or "TAKE-TWO" in as_name:
             simplified = "Take-Two"
         else:
             simplified = truncate_mixed_string(as_name, 20)
@@ -402,7 +402,7 @@ class Peer:
             domain = reverse_dns_lookup(self.ip)
 
             url = f"http://ip-api.com/json/{self.ip}?lang=zh-CN&fields=status,country,regionName,city,isp,org,as"
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, timeout=10)
             if r.status_code == 200:
                 d = r.json()
                 if d.get('status') == 'success':
@@ -748,12 +748,12 @@ def main():
             rows.sort(key=lambda x: x['stats']['avg_speed'], reverse=True)
 
             header = (
-                f"{pad_text('状态', 6)} | "
-                f"{pad_text('IP地址', 18)} | "
-                f"{pad_text('地区', 30)} | "
-                f"{pad_text('均速', 12)} | "
-                f"{pad_text('峰值', 12)} | "
-                f"{pad_text('延迟', 12)} | "
+                f"{pad_text('状态', 4)} | "
+                f"{pad_text('IP地址', 15)} | "
+                f"{pad_text('地区', 57)} | "
+                f"{pad_text('均速', 5)} | "
+                f"{pad_text('峰值', 5)} | "
+                f"{pad_text('延迟', 5)} | "
                 f"{pad_text('ASN/运营商', 35)}"
             )
             print(Style.BRIGHT + header + Style.RESET_ALL)
@@ -814,13 +814,13 @@ def main():
                         spd_str = f"{Fore.RED}{s['avg_speed']:.1f}{row_color}"
                         max_str = f"{Fore.RED}{s['max_speed']:.1f}{row_color}"
 
-                    col_status = pad_text(f"{status_indicator}", 6, 'center')
+                    col_status = pad_text(f"{status_indicator}", 4, 'center')
                     display_ip = mask_ip_for_privacy(p.ip, p.is_chinese)
-                    col_ip = pad_text(display_ip, 18)
-                    col_loc = pad_text(location_display, 30)
-                    col_spd = pad_text(spd_str, 12, 'right')
-                    col_max = pad_text(max_str, 12, 'right')
-                    col_lat = pad_text(lat_str, 12, 'right')
+                    col_ip = pad_text(display_ip, 15)
+                    col_loc = pad_text(location_display, 57)
+                    col_spd = pad_text(spd_str, 5, 'right')
+                    col_max = pad_text(max_str, 5, 'right')
+                    col_lat = pad_text(lat_str, 5, 'right')
                     col_isp = pad_text(p.isp, 35)
 
                     print(
