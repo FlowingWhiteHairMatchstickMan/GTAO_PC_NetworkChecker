@@ -759,13 +759,13 @@ def main():
 
             os.system('cls' if os.name == 'nt' else 'clear')
 
-            print(f"{Fore.CYAN}=== GTA5 战局网络监控 (ASN精准识别版) ==={Style.RESET_ALL}")
+            print(f"{Fore.CYAN}=== GTA 在线模式 & Red Dead 在线模式 战局网络监测工具 ==={Style.RESET_ALL}")
             print(f"{Fore.RED}⚠️  连接状况仅供参考，请根据实际情况自行判断{Style.RESET_ALL}")
             print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
 
             print(f"{Fore.YELLOW}监控IP: {LOCAL_IP} | 刷新次数: {refresh_count}{Style.RESET_ALL}")
             print(
-                f"{Fore.YELLOW}活跃连接数: {len(peers_map)} | UDP端口: {sorted(gta_ports) if gta_ports else '等待GTA5进程...'}{Style.RESET_ALL}")
+                f"{Fore.YELLOW}活跃连接数: {len(peers_map)} | UDP端口: {sorted(gta_ports) if gta_ports else '等待游戏进程...'}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}{'=' * 130}{Style.RESET_ALL}")
 
             rows = []
@@ -791,8 +791,8 @@ def main():
             print(f"{Fore.CYAN}{'-' * 130}{Style.RESET_ALL}")
 
             if not rows:
-                print(f"\n{Fore.YELLOW}暂无活跃连接，等待GTA5网络流量...{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}请确保GTA5正在运行且已进入在线战局{Style.RESET_ALL}")
+                print(f"\n{Fore.YELLOW}暂无活跃连接，等待游戏网络流量...{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}请确保游戏正在运行且已进入在线战局{Style.RESET_ALL}")
             else:
                 for item in rows:
                     p = item['peer']
