@@ -6,6 +6,7 @@ import psutil
 import requests
 import sys
 import os
+import ipaddress
 from ping3 import ping
 from colorama import Fore, Style, init
 from collections import deque, defaultdict
@@ -21,7 +22,7 @@ UDP_PORTS_TO_MONITOR = {6672, 61455, 61456, 61457, 61458}
 # ============
 
 init(autoreset=True)
-TARGET_PROCESS_KEYWORDS = ["GTA5", "GTA5_Enhanced"]
+TARGET_PROCESS_KEYWORDS = ["GTA5", "GTA5_Enhanced", "RDR2"]
 
 # 官方服务器配置
 TRADE_SERVER_IPS = {"192.81.245.200", "192.81.245.201"}
@@ -256,7 +257,7 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
 
     if as_number and as_name:
         if "Tencent" in as_name:
-            simplified = "腾讯云"
+            simplified = "腾讯"
         elif "Alibaba" in as_name or "Aliyun" in as_name:
             simplified = "阿里云"
         elif "China Telecom" in as_name:
@@ -268,13 +269,15 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
         elif "Cloudflare" in as_name:
             simplified = "Cloudflare"
         elif "Google" in as_name:
-            simplified = "Google"
+            simplified = "谷歌"
         elif "Microsoft" in as_name:
             simplified = "微软"
         elif "Amazon" in as_name or "AWS" in as_name:
             simplified = "AWS"
-        elif "Take-Two" in as_name or "Take Two" in as_name:
+        elif "Take-Two" in as_name or "Take Two" in as_name or "TAKE-TWO" in as_name:
             simplified = "Take-Two"
+        elif "Netease" in as_name:
+            simplified = "网易云"
         else:
             simplified = truncate_mixed_string(as_name, 20)
 
@@ -287,13 +290,23 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
         elif "alibaba" in org_lower or "aliyun" in org_lower:
             return "阿里云"
         elif "china telecom" in org_lower:
-            return "中国电信"
+            return "电信"
         elif "china mobile" in org_lower:
-            return "中国移动"
+            return "移动"
         elif "china unicom" in org_lower:
-            return "中国联通"
+            return "联通"
         elif "take-two" in org_lower or "take two" in org_lower:
             return "Take-Two"
+        elif "cloudflare" in org_lower:
+            return "Cloudflare"
+        elif "google" in org_lower:
+            return "谷歌"
+        elif "microsoft" in org_lower:
+            return "微软"
+        elif "amazon" in org_lower or "aws" in org_lower:
+            return "亚马逊"
+        elif "netease" in org_lower:
+            return "网易云"
         return truncate_mixed_string(org_data, 25)
 
     return truncate_mixed_string(isp_data, 25) if isp_data else "未知"
@@ -367,6 +380,12 @@ def get_rockstar_server_type(ip, domain, asn_info):
 
     return None
 
+def is_public_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_global
+    except ValueError:
+        return False
 
 class Peer:
     def __init__(self, ip):
@@ -385,6 +404,15 @@ class Peer:
     def _fetch_geo(self):
         """获取地理位置和ASN信息（带缓存）"""
         current_time = time.time()
+		
+        if not is_public_ip(self.ip):
+            self.location = "区域网"
+            self.isp = None
+            self.asn_info = None
+            self.is_chinese = False
+            self.server_type = None
+            self.last_geo_update = current_time
+            return
 
         with geo_lock:
             if self.ip in geo_cache:
@@ -402,7 +430,7 @@ class Peer:
             domain = reverse_dns_lookup(self.ip)
 
             url = f"http://ip-api.com/json/{self.ip}?lang=zh-CN&fields=status,country,regionName,city,isp,org,as"
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, timeout=10)
             if r.status_code == 200:
                 d = r.json()
                 if d.get('status') == 'success':
@@ -452,9 +480,13 @@ class Peer:
             self.location = "查询失败"
             self.isp = f"错误: {str(e)[:20]}"
 
-        with geo_lock:
-            geo_cache[self.ip] = (current_time, self.location, self.isp, self.asn_info,
-                                  self.is_chinese, self.server_type)
+        time.sleep(2)
+        self.location = "查询重试中..."
+        self.isp = "查询重试中..."
+        threading.Thread(target=self._fetch_geo, daemon=True).start()
+        #with geo_lock:
+        #    geo_cache[self.ip] = (current_time, self.location, self.isp, self.asn_info,
+        #                          self.is_chinese, self.server_type)
 
     def record_sample(self, current_total_bytes):
         """记录网络采样数据"""
@@ -593,7 +625,6 @@ def sampler():
                     if ip in raw_bytes_map:
                         del raw_bytes_map[ip]
 
-
 def port_scanner():
     """扫描GTA5进程端口"""
     global gta_ports
@@ -644,8 +675,8 @@ def main():
     # 清屏开始
     os.system('cls' if os.name == 'nt' else 'clear')
 
-    print(f"{Fore.CYAN}=== GTA5 战局网络监控 (ASN精准识别版) ==={Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}版本: 3.5 | EXE兼容版{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}=== GTA 在线模式 & Red Dead 在线模式 战局网络监测工具 ==={Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}版本: 3.6{Style.RESET_ALL}")
 
     # 获取用户输入的IP
     try:
@@ -669,7 +700,7 @@ def main():
     # 清屏显示配置信息
     os.system('cls' if os.name == 'nt' else 'clear')
 
-    print(f"{Fore.CYAN}=== GTA5 战局网络监控 (ASN精准识别版) ==={Style.RESET_ALL}")
+    print(f"{Fore.CYAN}=== GTA 在线模式 & Red Dead 在线模式 战局网络监测工具 ==={Style.RESET_ALL}")
     print(f"{Fore.RED}⚠️  连接状况仅供参考，请根据实际情况自行判断{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
 
@@ -748,13 +779,13 @@ def main():
             rows.sort(key=lambda x: x['stats']['avg_speed'], reverse=True)
 
             header = (
-                f"{pad_text('状态', 6)} | "
-                f"{pad_text('IP地址', 18)} | "
-                f"{pad_text('地区', 30)} | "
-                f"{pad_text('均速', 12)} | "
-                f"{pad_text('峰值', 12)} | "
-                f"{pad_text('延迟', 12)} | "
-                f"{pad_text('ASN/运营商', 35)}"
+                f"{pad_text('状态', 4)} | "
+                f"{pad_text('IP地址', 15)} | "
+                f"{pad_text('地区', 57)} | "
+                f"{pad_text('均速', 4)} | "
+                f"{pad_text('峰值', 4)} | "
+                f"{pad_text('延迟', 4)} | "
+                f"{pad_text('ASN/运营商', 22)}"
             )
             print(Style.BRIGHT + header + Style.RESET_ALL)
             print(f"{Fore.CYAN}{'-' * 130}{Style.RESET_ALL}")
@@ -783,7 +814,7 @@ def main():
                         status_indicator = "💀"
                     elif s['last_seen_sec'] > SAMPLE_INTERVAL * 5:
                         row_color = Fore.YELLOW
-                        status_indicator = "⚠️"
+                        status_indicator = "🏁"
                     elif s['avg_speed'] > 10:
                         row_color = Fore.GREEN
                         status_indicator = "🚀"
@@ -805,23 +836,26 @@ def main():
                             row_color = Fore.LIGHTRED_EX
                         else:
                             row_color = Fore.LIGHTYELLOW_EX
+							
+                    if p.location == "区域网":
+                        row_color = Style.DIM
 
                     spd_str = f"{s['avg_speed']:.1f}"
                     max_str = f"{s['max_speed']:.1f}"
-                    lat_str = f"{int(s['avg_lat'])}" if s['avg_lat'] else "超时"
+                    lat_str = f"{int(s['avg_lat'])}" if s['avg_lat'] else "N/A"
 
                     if s['is_lagger']:
                         spd_str = f"{Fore.RED}{s['avg_speed']:.1f}{row_color}"
                         max_str = f"{Fore.RED}{s['max_speed']:.1f}{row_color}"
 
-                    col_status = pad_text(f"{status_indicator}", 6, 'center')
+                    col_status = pad_text(f"{status_indicator}", 3, 'center')
                     display_ip = mask_ip_for_privacy(p.ip, p.is_chinese)
-                    col_ip = pad_text(display_ip, 18)
-                    col_loc = pad_text(location_display, 30)
-                    col_spd = pad_text(spd_str, 12, 'right')
-                    col_max = pad_text(max_str, 12, 'right')
-                    col_lat = pad_text(lat_str, 12, 'right')
-                    col_isp = pad_text(p.isp, 35)
+                    col_ip = pad_text(display_ip, 15)
+                    col_loc = pad_text(location_display, 57)
+                    col_spd = pad_text(spd_str, 4, 'right')
+                    col_max = pad_text(max_str, 4, 'right')
+                    col_lat = pad_text(lat_str, 4, 'right')
+                    col_isp = pad_text(p.isp, 22)
 
                     print(
                         f"{row_color}{col_status} | "
@@ -834,7 +868,7 @@ def main():
                     )
 
             print(f"\n{Fore.CYAN}{'=' * 130}{Style.RESET_ALL}")
-            print(f"{Style.DIM}状态: 💀断线 ⚠️空闲 🚀活跃 📡正常 📶低速 | 速度单位: KB/s | 延迟单位: ms{Style.RESET_ALL}")
+            print(f"{Style.DIM}状态: 💀断线 🏁空闲 🚀活跃 📡正常 📶低速 | 速度单位: KB/s | 延迟单位: ms{Style.RESET_ALL}")
             print(
                 f"{Style.DIM}提示: [裸连]国内IP (IP隐私保护) | [官方-*]服务器类型 | [疑似卡逼]速度>100KB/s{Style.RESET_ALL}")
             print(f"{Style.DIM}服务器: 紫色=交易 亮紫=云存档 亮青=CDN 亮红=中转 亮黄=其他官方{Style.RESET_ALL}")
