@@ -180,10 +180,6 @@ def get_user_input_ip():
         return get_user_input_ip()  # 重新获取输入
 
 
-# ... 中间的函数保持不变，包括：get_str_width, truncate_mixed_string, pad_text, mask_ip_for_privacy,
-# parse_asn_info, get_friendly_isp_name, is_chinese_ip, is_take_two_ip, is_rockstar_ip_range,
-# reverse_dns_lookup, get_rockstar_server_type, Peer类等 ...
-
 def get_str_width(s):
     """计算字符串显示宽度（中文字符算2个宽度）"""
     width = 0
@@ -380,12 +376,14 @@ def get_rockstar_server_type(ip, domain, asn_info):
 
     return None
 
+
 def is_public_ip(ip_str):
     try:
         ip = ipaddress.ip_address(ip_str)
         return ip.is_global
     except ValueError:
         return False
+
 
 class Peer:
     def __init__(self, ip):
@@ -404,7 +402,7 @@ class Peer:
     def _fetch_geo(self):
         """获取地理位置和ASN信息（带缓存）"""
         current_time = time.time()
-		
+
         if not is_public_ip(self.ip):
             self.location = "区域网"
             self.isp = None
@@ -484,7 +482,7 @@ class Peer:
         self.location = "查询重试中..."
         self.isp = "查询重试中..."
         threading.Thread(target=self._fetch_geo, daemon=True).start()
-        #with geo_lock:
+        # with geo_lock:
         #    geo_cache[self.ip] = (current_time, self.location, self.isp, self.asn_info,
         #                          self.is_chinese, self.server_type)
 
@@ -529,7 +527,9 @@ class Peer:
         time_since_seen = time.time() - self.last_seen
         is_alive = time_since_seen < (SAMPLE_INTERVAL * HISTORY_SIZE * 1.5)
 
-        is_lagger = avg_speed > 100 or max_speed > 100
+        # 修改卡逼判断逻辑：速度>100KB/s 或 速度波动剧烈（峰值/均值>3）
+        speed_variance = max_speed / avg_speed if avg_speed > 0 else 0
+        is_lagger = avg_speed > 100 or max_speed > 150 or speed_variance > 3
 
         return {
             'avg_speed': avg_speed,
@@ -625,6 +625,7 @@ def sampler():
                     if ip in raw_bytes_map:
                         del raw_bytes_map[ip]
 
+
 def port_scanner():
     """扫描GTA5进程端口"""
     global gta_ports
@@ -676,7 +677,7 @@ def main():
     os.system('cls' if os.name == 'nt' else 'clear')
 
     print(f"{Fore.CYAN}=== GTA 在线模式 & Red Dead 在线模式 战局网络监测工具 ==={Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}版本: 3.6{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}版本: 3.7 (修复卡逼显示问题){Style.RESET_ALL}")
 
     # 获取用户输入的IP
     try:
@@ -836,27 +837,48 @@ def main():
                             row_color = Fore.LIGHTRED_EX
                         else:
                             row_color = Fore.LIGHTYELLOW_EX
-							
+
                     if p.location == "区域网":
                         row_color = Style.DIM
 
-                    spd_str = f"{s['avg_speed']:.1f}"
-                    max_str = f"{s['max_speed']:.1f}"
+                    # === 修复卡逼显示问题的关键部分 ===
+                    # 先准备纯数值字符串（不带颜色）
+                    spd_str_raw = f"{s['avg_speed']:.1f}"
+                    max_str_raw = f"{s['max_speed']:.1f}"
+
+                    # 如果是卡逼，只在数值前添加红色标记，但保持数值完整
+                    if s['is_lagger']:
+                        spd_str = f"{Fore.RED}{spd_str_raw}{Style.RESET_ALL}"
+                        max_str = f"{Fore.RED}{max_str_raw}{Style.RESET_ALL}"
+                    else:
+                        spd_str = spd_str_raw
+                        max_str = max_str_raw
+
                     lat_str = f"{int(s['avg_lat'])}" if s['avg_lat'] else "N/A"
 
-                    if s['is_lagger']:
-                        spd_str = f"{Fore.RED}{s['avg_speed']:.1f}{row_color}"
-                        max_str = f"{Fore.RED}{s['max_speed']:.1f}{row_color}"
-
+                    # 准备各列数据（使用原始字符串进行宽度计算）
                     col_status = pad_text(f"{status_indicator}", 3, 'center')
                     display_ip = mask_ip_for_privacy(p.ip, p.is_chinese)
                     col_ip = pad_text(display_ip, 15)
                     col_loc = pad_text(location_display, 57)
-                    col_spd = pad_text(spd_str, 4, 'right')
-                    col_max = pad_text(max_str, 4, 'right')
+
+                    # 重要：pad_text函数应该传入纯文本，而不是带颜色的文本
+                    # 但为了显示颜色，我们需要在pad_text之后应用颜色
+                    col_spd_pure = pad_text(spd_str_raw, 4, 'right')
+                    col_max_pure = pad_text(max_str_raw, 4, 'right')
+
+                    # 重新应用颜色（如果是卡逼）
+                    if s['is_lagger']:
+                        col_spd = f"{Fore.RED}{col_spd_pure}{Style.RESET_ALL}"
+                        col_max = f"{Fore.RED}{col_max_pure}{Style.RESET_ALL}"
+                    else:
+                        col_spd = col_spd_pure
+                        col_max = col_max_pure
+
                     col_lat = pad_text(lat_str, 4, 'right')
                     col_isp = pad_text(p.isp, 22)
 
+                    # 打印行，使用row_color作为基础颜色，但速度列的颜色已经单独处理
                     print(
                         f"{row_color}{col_status} | "
                         f"{col_ip} | "
@@ -870,7 +892,7 @@ def main():
             print(f"\n{Fore.CYAN}{'=' * 130}{Style.RESET_ALL}")
             print(f"{Style.DIM}状态: 💀断线 🏁空闲 🚀活跃 📡正常 📶低速 | 速度单位: KB/s | 延迟单位: ms{Style.RESET_ALL}")
             print(
-                f"{Style.DIM}提示: [裸连]国内IP (IP隐私保护) | [官方-*]服务器类型 | [疑似卡逼]速度>100KB/s{Style.RESET_ALL}")
+                f"{Style.DIM}提示: [裸连]国内IP (IP隐私保护) | [官方-*]服务器类型 | [疑似卡逼]速度>100KB/s或波动剧烈{Style.RESET_ALL}")
             print(f"{Style.DIM}服务器: 紫色=交易 亮紫=云存档 亮青=CDN 亮红=中转 亮黄=其他官方{Style.RESET_ALL}")
             print(f"{Style.DIM}地理: 国内[省份城市] 国外[国家 地区] | ASN: AS号码(运营商简名){Style.RESET_ALL}")
             print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
