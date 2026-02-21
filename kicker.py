@@ -70,9 +70,9 @@ def display_all_network_interfaces():
 
         print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
 
+        # 修改点：只保留路由模式提示
         print(f"\n{Fore.YELLOW}选择建议:{Style.RESET_ALL}")
         print(f"  1. {Fore.GREEN}路由模式玩家:{Style.RESET_ALL} 选择显示为[虚拟网卡]的IP地址")
-        print(f"  2. {Fore.CYAN}进程模式玩家:{Style.RESET_ALL} 选择显示为[有线]或[无线]的IP地址")
 
     except Exception as e:
         print(f"{Fore.RED}获取网络接口信息失败: {e}{Style.RESET_ALL}")
@@ -97,6 +97,8 @@ def get_user_input_ip():
     display_all_network_interfaces()
 
     print(f"\n{Fore.CYAN}=== IP地址输入 ==={Style.RESET_ALL}")
+    # 修改点：只提路由模式
+    print(f"{Fore.YELLOW}路由模式玩家请输入虚拟网卡的IP{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}提示: 可以直接按回车使用自动检测的IP{Style.RESET_ALL}")
 
     # 自动检测可用的IP
@@ -429,7 +431,7 @@ def monitor():
 
             # 显示标题
             print(f"{Fore.CYAN}{'=' * 85}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}   GTA在线模式 裸连玩家临时踢出工具 v4.1 (双向阻断)   {Style.RESET_ALL}")
+            print(f"{Fore.CYAN}   GTA在线模式 裸连玩家临时踢出工具 v4.2 (仅路由模式)   {Style.RESET_ALL}")
             print(f"{Fore.CYAN}{'=' * 85}{Style.RESET_ALL}")
             print(
                 f"{Fore.GREEN}监控IP: {LOCAL_IP} | 端口: {sorted(MONITOR_PORTS)} | 检测间隔: {CHECK_INTERVAL}秒{Style.RESET_ALL}")
@@ -520,7 +522,7 @@ def monitor():
                     print(f"  {i}. {Fore.YELLOW}{ip}{Style.RESET_ALL} - 总流量: {total_speed}")
 
                 print(f"\n{Fore.RED}⚠️ 警告: 踢出裸连玩家可能会导致以下情况:{Style.RESET_ALL}")
-                print(f"  {Fore.RED}• 若不是战局主机: 自己卡入单人战局 (30秒后自动恢复){Style.RESET_ALL}")
+                print(f"  {Fore.RED}• 若不是战局主机: 自己卡入单人战局或无法踢出 {Style.RESET_ALL}")
                 print(f"  {Fore.YELLOW}• 如果是战局主机: 可安全踢出{Style.RESET_ALL}")
 
                 # 根据上次记住的选择处理
@@ -561,8 +563,7 @@ def monitor():
                     print(f"\n{Fore.GREEN}✓ 已临时阻断 {success_count}/{len(chinese_ips)} 个裸连玩家{Style.RESET_ALL}")
 
                     # 如果不是主机，给出警告
-                    print(f"{Fore.YELLOW}⚠️ 提示: 如果您不是战局主机，踢出操作可能导致您卡入单人战局{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}如果出现卡单人战局的情况，等待30秒后将自动恢复{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}⚠️ 提示: 如果您不是战局主机，踢出操作可能导致您卡入单人战局或无法踢出{Style.RESET_ALL}")
                 elif response and response.lower() == 'n':
                     print(f"{Fore.CYAN}已取消踢出操作{Style.RESET_ALL}")
             else:
@@ -585,13 +586,13 @@ def main():
     clear_screen()
 
     print(f"{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}   GTA在线模式 裸连玩家临时踢出工具 v4.1   {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}   GTA 在线模式 & Red Dead 在线模式 裸连玩家踢出工具   {Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}监测端口: {sorted(MONITOR_PORTS)}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}检测间隔: {CHECK_INTERVAL}秒 (首次立即检测){Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}临时阻断: {BLOCK_DURATION}秒后自动恢复 (双向阻断){Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}新增功能: 双向流量监控 + 双向防火墙阻断{Style.RESET_ALL}")
-    print(f"{Fore.RED}⚠️  警告: 踢出功能可能导致卡单人战局(30秒恢复){Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}检测间隔: {CHECK_INTERVAL}秒{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}临时阻断: {BLOCK_DURATION}秒后自动恢复{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}运行模式: 仅支持路由模式{Style.RESET_ALL}")
+    print(f"{Fore.RED}⚠️  警告: 踢出功能可能导致卡单人战局    {Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
 
     # 获取用户输入的IP
@@ -601,13 +602,13 @@ def main():
     clear_screen()
 
     print(f"{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}   GTA在线模式 裸连玩家临时踢出工具 v4.1   {Style.RESET_ALL}")
+    print(f"{Fore.CYAN}   GTA 在线模式 & Red Dead 在线模式 裸连玩家踢出工具   {Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}监控本地IP: {LOCAL_IP}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}监控端口: {sorted(MONITOR_PORTS)}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}检测间隔: {CHECK_INTERVAL}秒 (首次立即检测){Style.RESET_ALL}")
-    print(f"{Fore.GREEN}临时阻断: {BLOCK_DURATION}秒后自动恢复 (双向阻断){Style.RESET_ALL}")
-    print(f"{Fore.GREEN}双向流量: ↓下载 / ↑上传 分开显示{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}监测端口: {sorted(MONITOR_PORTS)}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}检测间隔: {CHECK_INTERVAL}秒{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}临时阻断: {BLOCK_DURATION}秒后自动恢复{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}运行模式: 仅支持路由模式{Style.RESET_ALL}")
+    print(f"{Fore.RED}⚠️  警告: 踢出功能可能导致卡单人战局    {Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
 
     # 询问是否启用记住功能

@@ -677,7 +677,6 @@ def main():
     os.system('cls' if os.name == 'nt' else 'clear')
 
     print(f"{Fore.CYAN}=== GTA 在线模式 & Red Dead 在线模式 战局网络监测工具 ==={Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}版本: 3.7 (修复卡逼显示问题){Style.RESET_ALL}")
 
     # 获取用户输入的IP
     try:

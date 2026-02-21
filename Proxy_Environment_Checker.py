@@ -508,7 +508,6 @@ def main():
     print(f"{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
     print(
         f"{Fore.CYAN}=== 检测使用路由模式加速 GTA 在线模式 & Red Dead 在线模式 的加速器是否为假加速 ==={Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}版本: 1.0{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
 
     # 显示过滤信息
@@ -652,14 +651,13 @@ def analyze_results(results, physical_ip, virtual_ip):
             print(f"\n{Fore.YELLOW}流量分析: 两个网卡流量相当 ({total_physical} vs {total_virtual}){Style.RESET_ALL}")
             print(f"{Fore.YELLOW}流量严重分流，加速器未完全接管{Style.RESET_ALL}")
 
-        print(f"\n{Fore.RED}【必须执行的操作】{Style.RESET_ALL}")
+        print(f"\n{Fore.RED}【强烈建议执行的操作】{Style.RESET_ALL}")
         print(f"{Fore.RED}请按顺序尝试以下解决方案：{Style.RESET_ALL}")
         print(f"  {Fore.RED}1️⃣  完全退出游戏和加速器{Style.RESET_ALL}")
-        print(f"  {Fore.RED}2️⃣  重启加速器并重新加速游戏{Style.RESET_ALL}")
-        print(f"  {Fore.RED}3️⃣  通过加速器启动游戏（而非先开游戏后开加速器）{Style.RESET_ALL}")
-        print(f"  {Fore.RED}4️⃣  如果问题依旧，尝试更换加速器节点{Style.RESET_ALL}")
-        print(f"  {Fore.RED}5️⃣  重启电脑后重新检测{Style.RESET_ALL}")
-        print(f"  {Fore.RED}6️⃣  联系加速器客服，确认是否支持路由模式，或切换为进程模式{Style.RESET_ALL}")
+        print(f"  {Fore.RED}2️⃣  重启加速器并更换加速器节点重新加速{Style.RESET_ALL}")
+        print(f"  {Fore.RED}3️⃣  加速后再启动游戏{Style.RESET_ALL}")
+        print(f"  {Fore.RED}4️⃣  重新检测，如果问题依旧，重启电脑后重新执行如上操作并继续检测{Style.RESET_ALL}")
+        print(f"  {Fore.RED}5️⃣  若依旧出现该情况，请放弃使用路由模式，切换为进程模式，或联系加速器官方客服获取帮助{Style.RESET_ALL}")
 
     elif total_virtual > total_physical * 3:  # 虚拟网卡流量是物理的3倍以上
         print(f"\n{Fore.GREEN}✅ 加速器状态: 正常加速{Style.RESET_ALL}")
@@ -675,7 +673,7 @@ def analyze_results(results, physical_ip, virtual_ip):
         print(f"  1. 加速器未正确设置路由规则")
         print(f"  2. 加速器节点连接问题")
         print(f"  3. 游戏未通过加速器进行在线游玩")
-        print(f"\n{Fore.YELLOW}建议操作:{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}【建议执行的操作】{Style.RESET_ALL}")
         print(f"  1. {Fore.YELLOW}重启加速器并重新加速{Style.RESET_ALL}")
         print(f"  2. {Fore.YELLOW}更换加速器节点{Style.RESET_ALL}")
         print(f"  3. {Fore.YELLOW}通过加速器启动游戏{Style.RESET_ALL}")
