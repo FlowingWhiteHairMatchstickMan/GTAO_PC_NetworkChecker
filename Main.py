@@ -527,9 +527,8 @@ class Peer:
         time_since_seen = time.time() - self.last_seen
         is_alive = time_since_seen < (SAMPLE_INTERVAL * HISTORY_SIZE * 1.5)
 
-        # 修改卡逼判断逻辑：速度>100KB/s 或 速度波动剧烈（峰值/均值>3）
-        speed_variance = max_speed / avg_speed if avg_speed > 0 else 0
-        is_lagger = avg_speed > 100 or max_speed > 150 or speed_variance > 3
+        # 恢复原始的卡逼判断规则：只根据速度阈值
+        is_lagger = avg_speed > 100 or max_speed > 100
 
         return {
             'avg_speed': avg_speed,
@@ -891,7 +890,7 @@ def main():
             print(f"\n{Fore.CYAN}{'=' * 130}{Style.RESET_ALL}")
             print(f"{Style.DIM}状态: 💀断线 🏁空闲 🚀活跃 📡正常 📶低速 | 速度单位: KB/s | 延迟单位: ms{Style.RESET_ALL}")
             print(
-                f"{Style.DIM}提示: [裸连]国内IP (IP隐私保护) | [官方-*]服务器类型 | [疑似卡逼]速度>100KB/s或波动剧烈{Style.RESET_ALL}")
+                f"{Style.DIM}提示: [裸连]国内IP (IP隐私保护) | [官方-*]服务器类型 | [疑似卡逼]速度>100KB/s{Style.RESET_ALL}")
             print(f"{Style.DIM}服务器: 紫色=交易 亮紫=云存档 亮青=CDN 亮红=中转 亮黄=其他官方{Style.RESET_ALL}")
             print(f"{Style.DIM}地理: 国内[省份城市] 国外[国家 地区] | ASN: AS号码(运营商简名){Style.RESET_ALL}")
             print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
