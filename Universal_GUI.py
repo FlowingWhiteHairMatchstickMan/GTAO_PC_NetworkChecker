@@ -14,6 +14,8 @@ import psutil
 import requests
 import ipaddress
 import multiprocessing
+import pydivert
+import queue
 from collections import deque, defaultdict
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -29,20 +31,14 @@ from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
 def get_base_path():
     """获取程序所在目录（兼容开发环境和打包后的exe）"""
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe 运行
         return os.path.dirname(sys.executable)
     else:
-        # 开发环境运行
         return os.path.dirname(os.path.abspath(__file__))
-
 
 def get_icon_path():
     """获取图标文件路径（兼容打包）"""
-    # 使用你实际打包时指定的图标文件名
     icon_filename = "ad8886a276923f717c5abf11f10228ee_256x256.ico"
-
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe 运行
         if hasattr(sys, '_MEIPASS'):
             base = sys._MEIPASS
         else:
@@ -428,75 +424,128 @@ def run_locked_filter():
             w.send(packet)
     except Exception as e:
         print(f"战局锁过滤器启动失败: {e}")
+def blocker_process_func(local_ip, cmd_queue):
+    """独立子进程函数，执行阻断过滤器"""
+    import pydivert
+    import time
+    import queue
 
-# ====================== 按需阻断管理器 ======================
+    port_list = ' or '.join(f'udp.DstPort == {p}' for p in UDP_PORTS_TO_MONITOR)
+    filter_str = f"({port_list}) and ip"
+    w = None
+    try:
+        w = pydivert.WinDivert(filter_str)
+        w.open()
+        print("[阻断进程] 过滤器已启动")
+    except Exception as e:
+        print(f"[阻断进程] 启动失败: {e}")
+        return
+
+    blocked_ips = set()
+    temp_blocked = {}
+
+    while True:
+        try:
+            cmd = cmd_queue.get_nowait()
+            if cmd is None:
+                break
+            if cmd[0] == 'block':
+                _, ip, permanent, duration_sec = cmd
+                if permanent:
+                    blocked_ips.add(ip)
+                    print(f"[阻断进程] 永久阻断: {ip}")
+                else:
+                    temp_blocked[ip] = time.time() + duration_sec
+                    print(f"[阻断进程] 临时阻断: {ip} ({duration_sec}s)")
+            elif cmd[0] == 'unblock':
+                _, ip = cmd
+                if ip in blocked_ips:
+                    blocked_ips.discard(ip)
+                    print(f"[阻断进程] 解除永久: {ip}")
+                if ip in temp_blocked:
+                    del temp_blocked[ip]
+                    print(f"[阻断进程] 解除临时: {ip}")
+        except queue.Empty:
+            pass
+
+        now = time.time()
+        for ip in list(temp_blocked.keys()):
+            if now >= temp_blocked[ip]:
+                del temp_blocked[ip]
+                print(f"[阻断进程] 临时超时解除: {ip}")
+
+        try:
+            packet = w.recv()
+            if packet is None:
+                continue
+            if not packet.is_inbound:
+                w.send(packet)
+                continue
+            src_ip = packet.src_addr
+            if local_ip and src_ip == local_ip:
+                w.send(packet)
+                continue
+            if src_ip in blocked_ips or src_ip in temp_blocked:
+                continue
+            else:
+                w.send(packet)
+        except Exception as e:
+            print(f"[阻断进程] 异常: {e}")
+            break
+
+    if w:
+        w.close()
+    print("[阻断进程] 退出")
+# ====================== 按需阻断管理器（独立进程版本） ======================
 class OnDemandBlocker:
     def __init__(self):
         self.blocked_ips = set()
         self.temp_blocked = {}
-        self.filter = None
+        self.process = None
+        self.cmd_queue = None
         self.running = False
-        self.thread = None
+        self.local_ip = None
         self.lock = threading.Lock()
 
-    def _ensure_running(self):
+    def set_local_ip(self, ip):
+        self.local_ip = ip
+
+    def start(self):
         with self.lock:
             if self.running:
                 return
+            # 关键：先创建队列
+            self.cmd_queue = multiprocessing.Queue()
+            self.process = multiprocessing.Process(
+                target=blocker_process_func,
+                args=(self.local_ip, self.cmd_queue),
+                daemon=True
+            )
+            self.process.start()
             self.running = True
-            self.thread = threading.Thread(target=self._filter_loop, daemon=True)
-            self.thread.start()
-
-    def _filter_loop(self):
-        try:
-            import pydivert
-            port_list = ' or '.join(f'udp.DstPort == {p}' for p in UDP_PORTS_TO_MONITOR)
-            filter_str = f"({port_list}) and ip"
-            self.filter = pydivert.WinDivert(filter_str)
-            self.filter.open()
-        except Exception as e:
-            print(f"启动阻断过滤器失败: {e}")
-            self.running = False
-            return
-        while self.running:
-            now = time.time()
-            with self.lock:
-                for ip in list(self.temp_blocked.keys()):
-                    if now >= self.temp_blocked[ip]:
-                        del self.temp_blocked[ip]
-            with self.lock:
-                has_block = bool(self.blocked_ips or self.temp_blocked)
-            if not has_block:
-                time.sleep(1)
-                continue
-            try:
-                packet = self.filter.recv(timeout_ms=100)
-                if packet is None:
-                    continue
-                src_ip = packet.src_addr
-                with self.lock:
-                    if src_ip in self.blocked_ips or src_ip in self.temp_blocked:
-                        continue
-                self.filter.send(packet)
-            except Exception:
-                pass
-        if self.filter:
-            try:
-                self.filter.close()
-            except:
-                pass
 
     def block_ip(self, ip, permanent=True, duration_sec=30):
+        if self.local_ip and ip == self.local_ip:
+            print(f"[阻断] 拒绝阻断本机 IP {ip}")
+            return
+        if not self.running:
+            self.start()
+        # 发送命令到子进程
+        self.cmd_queue.put(('block', ip, permanent, duration_sec))
+
+        # 同时记录到主进程（用于 UI 显示）
         with self.lock:
             if permanent:
                 self.blocked_ips.add(ip)
             else:
                 self.temp_blocked[ip] = time.time() + duration_sec
-        self._ensure_running()
 
     def unblock_ip(self, ip):
+        if self.running:
+            self.cmd_queue.put(('unblock', ip))
         with self.lock:
-            self.blocked_ips.discard(ip)
+            if ip in self.blocked_ips:
+                self.blocked_ips.discard(ip)
             if ip in self.temp_blocked:
                 del self.temp_blocked[ip]
 
@@ -521,12 +570,22 @@ class OnDemandBlocker:
             return result
 
     def stop(self):
-        self.running = False
-        if self.filter:
-            try:
-                self.filter.close()
-            except:
-                pass
+        with self.lock:
+            if not self.running:
+                return
+            self.running = False
+            # 尝试发送停止信号（可选，但可能无效）
+            if self.cmd_queue:
+                try:
+                    self.cmd_queue.put(None, timeout=0.1)
+                except:
+                    pass
+            # 强制终止子进程
+            if self.process and self.process.is_alive():
+                self.process.terminate()
+                self.process.join(0.2)  # 短暂等待清理
+            self.process = None
+            self.cmd_queue = None
 
 # ====================== 进程监控线程（挂逼崩溃检测） ======================
 class ProcessMonitorThread(QThread):
@@ -812,13 +871,14 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # 选择本地IP
+        # 选择本地IP（对话框无父窗口，独立弹出）
         global LOCAL_IP
         LOCAL_IP = self.get_user_input_ip()
         if not LOCAL_IP:
             QMessageBox.critical(self, "错误", "未选择有效IP，程序退出")
             sys.exit(1)
-        # 初始化黑名单（使用正确的路径）
+
+        # 初始化黑名单
         self.base_path = get_base_path()
         self.blacklist_file = os.path.join(self.base_path, "permanent_blacklist.txt")
         self.permanent_blacklist = set()
@@ -831,6 +891,8 @@ class MainWindow(QMainWindow):
 
         # 阻断器
         self.blocker = OnDemandBlocker()
+        self.blocker.set_local_ip(LOCAL_IP)
+        self.blocker.start()
         for ip in self.permanent_blacklist:
             self.blocker.block_ip(ip, permanent=True)
 
@@ -853,6 +915,9 @@ class MainWindow(QMainWindow):
         self.block_timer.start(1000)
         self.crash_detection_enabled = False
         self.show_private_ip = False
+
+        # 最后显示主窗口
+        self.show()
 
     def on_temp_block_ip(self):
         ip, ok = QInputDialog.getText(self, "临时阻断IP", "请输入要临时阻断的IP地址（30秒后自动解除）:")
@@ -1357,7 +1422,6 @@ class MainWindow(QMainWindow):
         self.proc_monitor.stop()
         self.blocker.stop()
         event.accept()
-
 
 def main():
     if sys.platform == "win32":
