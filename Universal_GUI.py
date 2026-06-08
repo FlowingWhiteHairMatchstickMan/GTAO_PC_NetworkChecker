@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 GTA5/RDR2 网络监控工具 - 整合命令行抓包核心 + GUI 功能
+（PyQt6 版本 - 修复：退出时驱动占用，新增：忘记IP、按需阻断、本地DLL加载、自动安装驱动）
 """
 
 import sys
@@ -16,36 +17,160 @@ import ipaddress
 import multiprocessing
 import pydivert
 import queue
+import subprocess
+import warnings
 from collections import deque, defaultdict
 
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTableWidget, QTableWidgetItem,
                              QPushButton, QLabel, QMessageBox, QHeaderView,
                              QTabWidget, QGroupBox, QFormLayout, QLineEdit,
-                             QTextEdit, QInputDialog, QComboBox, QDialog,
+                             QTextEdit, QComboBox, QDialog,
                              QDialogButtonBox, QCheckBox)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QSettings
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QSettings
+from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
+
 
 # ====================== 路径辅助函数 ======================
 def get_base_path():
     """获取程序所在目录（兼容开发环境和打包后的exe）"""
     if getattr(sys, 'frozen', False):
+        if hasattr(sys, '_MEIPASS'):
+            return sys._MEIPASS
         return os.path.dirname(sys.executable)
     else:
         return os.path.dirname(os.path.abspath(__file__))
 
+
 def get_icon_path():
     """获取图标文件路径（兼容打包）"""
-    icon_filename = "ad8886a276923f717c5abf11f10228ee_256x256.ico"
-    if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
+    icon_filename = "ico.ico"
+    base = get_base_path()
+    icon_path = os.path.join(base, icon_filename)
+    if not os.path.exists(icon_path) and getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        alt_path = os.path.join(exe_dir, icon_filename)
+        if os.path.exists(alt_path):
+            return alt_path
+    return icon_path
+
+
+# ====================== DLL 搜索路径设置 ======================
+def set_dll_search_path():
+    """将程序所在目录添加到 DLL 搜索路径，确保能找到 WinDivert.dll"""
+    if sys.platform != "win32":
+        return
+    base_dir = get_base_path()
+    try:
+        # 方法1：添加到 PATH 环境变量（对所有子进程有效）
+        path_env = os.environ.get('PATH', '')
+        if base_dir not in path_env.split(os.pathsep):
+            os.environ['PATH'] = base_dir + os.pathsep + path_env
+            print(f"[DLL] 已添加到 PATH: {base_dir}")
+
+        # 方法2：Python 3.8+ 的 add_dll_directory
+        if hasattr(os, 'add_dll_directory'):
+            os.add_dll_directory(base_dir)
+            print(f"[DLL] 已添加搜索路径: {base_dir}")
         else:
-            base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, icon_filename)
+            # 旧版本使用 SetDllDirectoryW
+            import ctypes
+            ctypes.windll.kernel32.SetDllDirectoryW(base_dir)
+            print(f"[DLL] 已设置 DllDirectory: {base_dir}")
+
+        # 方法3：提前加载 DLL（如果存在），确保系统能找到
+        dll_path = os.path.join(base_dir, 'WinDivert.dll')
+        if os.path.exists(dll_path):
+            try:
+                import ctypes
+                ctypes.CDLL(dll_path)
+                print(f"[DLL] 已提前加载: {dll_path}")
+            except Exception as e:
+                print(f"[DLL] 提前加载失败: {e}")
+    except Exception as e:
+        print(f"[DLL] 设置搜索路径失败: {e}")
+
+
+# ====================== WinDivert 驱动安装 ======================
+def ensure_windivert_driver():
+    """确保 WinDivert 驱动已安装并启动"""
+    if sys.platform != "win32":
+        return True
+
+    # 首先尝试直接打开过滤器
+    try:
+        w = pydivert.WinDivert("false")
+        w.open()
+        w.close()
+        print("[驱动] 驱动已就绪")
+        return True
+    except Exception as e:
+        print(f"[驱动] 驱动未就绪: {e}")
+
+    # 如果失败，尝试安装驱动
+    try:
+        # 方法1：使用 pydivert 自带的注册
+        if not pydivert.WinDivert.is_registered():
+            print("[驱动] 尝试通过 pydivert 注册驱动...")
+            pydivert.WinDivert.register()
+        # 验证
+        w = pydivert.WinDivert("false")
+        w.open()
+        w.close()
+        print("[驱动] pydivert 注册成功")
+        return True
+    except Exception as e:
+        print(f"[驱动] pydivert 注册失败: {e}")
+
+    # 方法2：使用 windivertctl.exe
+    try:
+        base = get_base_path()
+        ctl_path = os.path.join(base, "windivertctl.exe")
+        if not os.path.exists(ctl_path):
+            print("[驱动] windivertctl.exe 未找到")
+            return False
+
+        print("[驱动] 使用 windivertctl.exe 安装驱动...")
+        # 先卸载旧驱动
+        subprocess.run([ctl_path, "uninstall"], capture_output=True, shell=True, timeout=5)
+        time.sleep(0.5)
+        # 安装驱动
+        result = subprocess.run([ctl_path, "install"], capture_output=True, text=True, shell=True, timeout=10)
+        if result.returncode != 0:
+            print(f"[驱动] windivertctl 安装失败: {result.stderr}")
+            return False
+        # 启动驱动服务
+        subprocess.run(["sc", "start", "windivert"], capture_output=True, shell=True, timeout=5)
+        time.sleep(2)
+
+        # 验证
+        w = pydivert.WinDivert("false")
+        w.open()
+        w.close()
+        print("[驱动] 手动安装成功，驱动已就绪")
+        return True
+    except subprocess.TimeoutExpired:
+        print("[驱动] 驱动安装超时")
+        return False
+    except Exception as e:
+        print(f"[驱动] 手动安装失败: {e}")
+
+    return False
+
+
+def check_driver_available():
+    """检查 WinDivert 驱动是否可用"""
+    try:
+        w = pydivert.WinDivert("false")
+        w.open()
+        w.close()
+        return True
+    except Exception as e:
+        return False
+
 
 # ====================== 配置常量 ======================
 SAMPLE_INTERVAL = 2
@@ -75,11 +200,13 @@ data_lock = threading.Lock()
 geo_lock = threading.Lock()
 dns_lock = threading.Lock()
 
+
 def get_str_width(s):
     width = 0
     for char in s:
         width += 2 if '\u4e00' <= char <= '\u9fff' else 1
     return width
+
 
 def truncate_mixed_string(text, max_width):
     current_width = 0
@@ -91,6 +218,7 @@ def truncate_mixed_string(text, max_width):
         result += char
         current_width += char_width
     return result
+
 
 def pad_text(text, width, align='left'):
     text = str(text)
@@ -106,12 +234,14 @@ def pad_text(text, width, align='left'):
         right = width - w - left
         return " " * left + text + " " * right
 
+
 def is_public_ip(ip_str):
     try:
         ip = ipaddress.ip_address(ip_str)
         return ip.is_global
     except:
         return False
+
 
 def reverse_dns_lookup(ip):
     with dns_lock:
@@ -124,6 +254,7 @@ def reverse_dns_lookup(ip):
         return domain
     except:
         return None
+
 
 def get_rockstar_server_type(ip, domain, asn_info):
     if ip in TRADE_SERVER_IPS:
@@ -140,6 +271,7 @@ def get_rockstar_server_type(ip, domain, asn_info):
         return "官方-其他服务器"
     return None
 
+
 def parse_asn_info(asn_str):
     if not asn_str:
         return None, None
@@ -147,6 +279,7 @@ def parse_asn_info(asn_str):
     if len(parts) == 2:
         return parts[0], parts[1]
     return None, asn_str
+
 
 def get_friendly_isp_name(isp_data, org_data, as_data):
     as_number, as_name = parse_asn_info(as_data)
@@ -170,6 +303,7 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
                 return short
         return truncate_mixed_string(org_data, 25)
     return truncate_mixed_string(isp_data, 25) if isp_data else "未知"
+
 
 def get_geo_info(ip):
     if ip in geo_cache:
@@ -213,6 +347,7 @@ def get_geo_info(ip):
     info = ("未知", "-", False, None)
     geo_cache[ip] = info
     return info
+
 
 # ====================== Peer 类 ======================
 class Peer:
@@ -267,12 +402,14 @@ class Peer:
             'is_lagger': is_lagger
         }
 
+
 # ====================== 全局抓包变量 ======================
 raw_bytes_map = defaultdict(int)
 peers_map = {}
 gta_ports = set(UDP_PORTS_TO_MONITOR)
 running = True
 LOCAL_IP = ""
+
 
 def sniffer():
     global raw_bytes_map, gta_ports, running
@@ -298,7 +435,7 @@ def sniffer():
             if iph[6] != 17:
                 continue
             ihl = (iph[0] & 0xF) * 4
-            udph = struct.unpack('!HHHH', raw[ihl:ihl+8])
+            udph = struct.unpack('!HHHH', raw[ihl:ihl + 8])
             src_port = udph[0]
             dst_port = udph[1]
             if not (src_port in gta_ports or dst_port in gta_ports):
@@ -312,6 +449,7 @@ def sniffer():
                 raw_bytes_map[remote] += len(raw)
         except:
             pass
+
 
 def sampler():
     global peers_map, raw_bytes_map, running
@@ -333,6 +471,7 @@ def sampler():
                         del peers_map[ip]
                     if ip in raw_bytes_map:
                         del raw_bytes_map[ip]
+
 
 def port_scanner():
     global gta_ports, running
@@ -357,9 +496,11 @@ def port_scanner():
             gta_ports = all_ports
         time.sleep(5)
 
+
 # ====================== 过滤器函数（模块级，避免多进程重复启动GUI） ======================
 def run_solo_filter():
     """卡单人战局过滤器（独立进程）"""
+    set_dll_search_path()
     try:
         import pydivert
         filter_str = "(udp.DstPort == 6672 and udp.PayloadLength > 0) and ip"
@@ -405,8 +546,10 @@ def run_solo_filter():
         except Exception:
             pass
 
+
 def run_locked_filter():
     """战局锁过滤器（独立进程）：只丢弃匹配请求包"""
+    set_dll_search_path()
     try:
         import pydivert
         filter_str = "udp.DstPort == 6672 and udp.PayloadLength > 0 and ip"
@@ -424,8 +567,11 @@ def run_locked_filter():
             w.send(packet)
     except Exception as e:
         print(f"战局锁过滤器启动失败: {e}")
+
+
 def blocker_process_func(local_ip, cmd_queue):
     """独立子进程函数，执行阻断过滤器"""
+    set_dll_search_path()
     import pydivert
     import time
     import queue
@@ -496,7 +642,9 @@ def blocker_process_func(local_ip, cmd_queue):
     if w:
         w.close()
     print("[阻断进程] 退出")
-# ====================== 按需阻断管理器（独立进程版本） ======================
+
+
+# ====================== 按需阻断管理器（优化版） ======================
 class OnDemandBlocker:
     def __init__(self):
         self.blocked_ips = set()
@@ -506,48 +654,180 @@ class OnDemandBlocker:
         self.running = False
         self.local_ip = None
         self.lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._check_thread = None
+        self._check_running = False
 
     def set_local_ip(self, ip):
         self.local_ip = ip
 
-    def start(self):
-        with self.lock:
-            if self.running:
-                return
-            # 关键：先创建队列
-            self.cmd_queue = multiprocessing.Queue()
-            self.process = multiprocessing.Process(
-                target=blocker_process_func,
-                args=(self.local_ip, self.cmd_queue),
-                daemon=True
-            )
-            self.process.start()
-            self.running = True
+    def check_driver(self):
+        """检查驱动是否可用 - 每次调用都重新检测"""
+        try:
+            w = pydivert.WinDivert("false")
+            w.open()
+            w.close()
+            return True
+        except Exception as e:
+            print(f"[阻断] 驱动检查失败: {e}")
+            return False
+
+    def _start_internal(self):
+        """内部启动阻断进程（非阻塞）"""
+        if self.running:
+            return
+        if not self.check_driver():
+            print("[阻断] WinDivert 驱动不可用，阻断功能将无效")
+            return
+
+        self._stop_event.clear()
+        self.cmd_queue = multiprocessing.Queue()
+        self.process = multiprocessing.Process(
+            target=blocker_process_func,
+            args=(self.local_ip, self.cmd_queue),
+            daemon=True
+        )
+        self.process.start()
+        self.running = True
+        # 启动检查线程
+        self._start_check_thread()
+        print("[阻断] 阻断进程已按需启动")
+
+    def _start_check_thread(self):
+        """启动临时阻断检查线程"""
+        if self._check_running:
+            return
+        self._check_running = True
+        self._check_thread = threading.Thread(target=self._check_temp_blocked, daemon=True)
+        self._check_thread.start()
+
+    def _check_temp_blocked(self):
+        """定期检查临时阻断是否超时"""
+        while self._check_running and self.running:
+            time.sleep(1)  # 每秒检查一次
+            now = time.time()
+            expired_ips = []
+            with self.lock:
+                for ip, expire_time in list(self.temp_blocked.items()):
+                    if now >= expire_time:
+                        expired_ips.append(ip)
+            for ip in expired_ips:
+                print(f"[阻断] 临时阻断已超时，自动解除: {ip}")
+                self.unblock_ip(ip)
+
+    def _stop_check_thread(self):
+        """停止检查线程"""
+        self._check_running = False
+        if self._check_thread and self._check_thread.is_alive():
+            try:
+                self._check_thread.join(0.1)
+            except RuntimeError:
+                pass
+        self._check_thread = None
+
+    def _stop_internal(self, timeout=0.5):
+        """内部停止阻断进程（非阻塞，快速返回）"""
+        if not self.running:
+            return
+
+        self.running = False
+        self._stop_event.set()
+
+        if self.cmd_queue:
+            try:
+                self.cmd_queue.put(None, timeout=0.1)
+            except:
+                pass
+
+        if self.process and self.process.is_alive():
+            def wait_for_process():
+                try:
+                    self.process.join(timeout)
+                    if self.process.is_alive():
+                        self.process.terminate()
+                        self.process.join(0.3)
+                except Exception as e:
+                    print(f"[阻断] 停止进程时出错: {e}")
+                finally:
+                    self.process = None
+                    self.cmd_queue = None
+                    self._stop_check_thread()
+                    print("[阻断] 阻断进程已停止")
+
+            threading.Thread(target=wait_for_process, daemon=True).start()
+        else:
+            self.process = None
+            self.cmd_queue = None
+            self._stop_check_thread()
+            print("[阻断] 阻断进程已停止")
 
     def block_ip(self, ip, permanent=True, duration_sec=30):
+        """添加阻断IP（按需启动，非阻塞）"""
+        if not self.check_driver():
+            print("[阻断] 驱动不可用，无法阻断")
+            return False
         if self.local_ip and ip == self.local_ip:
             print(f"[阻断] 拒绝阻断本机 IP {ip}")
-            return
-        if not self.running:
-            self.start()
-        # 发送命令到子进程
-        self.cmd_queue.put(('block', ip, permanent, duration_sec))
+            return False
 
-        # 同时记录到主进程（用于 UI 显示）
-        with self.lock:
-            if permanent:
-                self.blocked_ips.add(ip)
-            else:
-                self.temp_blocked[ip] = time.time() + duration_sec
+        if not self.running:
+            self._start_internal()
+            if not self.running:
+                print("[阻断] 阻断进程启动失败")
+                return False
+
+        try:
+            self.cmd_queue.put(('block', ip, permanent, duration_sec), timeout=0.5)
+            with self.lock:
+                if permanent:
+                    self.blocked_ips.add(ip)
+                else:
+                    self.temp_blocked[ip] = time.time() + duration_sec
+            print(f"[阻断] 已添加阻断: {ip} ({'永久' if permanent else '临时'})")
+            return True
+        except queue.Full:
+            print("[阻断] 命令队列已满")
+            return False
 
     def unblock_ip(self, ip):
+        """解除阻断IP（自动停止，非阻塞）"""
         if self.running:
-            self.cmd_queue.put(('unblock', ip))
+            try:
+                self.cmd_queue.put(('unblock', ip), timeout=0.5)
+            except:
+                pass
+
         with self.lock:
             if ip in self.blocked_ips:
                 self.blocked_ips.discard(ip)
+                print(f"[阻断] 已解除永久阻断: {ip}")
             if ip in self.temp_blocked:
                 del self.temp_blocked[ip]
+                print(f"[阻断] 已解除临时阻断: {ip}")
+
+        # 如果没有任何IP被阻断，自动停止进程
+        if self.running and not self.blocked_ips and not self.temp_blocked:
+            self._stop_internal()
+
+    def kick_ip(self, ip):
+        """发送踢人包（直接通过UDP发送断开包）"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            kick_packet = bytearray()
+            kick_packet.extend(b'\x00' * 4)
+            kick_packet.extend(b'\x01\x00\x00\x00')
+            kick_packet.extend(struct.pack('!I', 0xFFFFFFFF))
+            kick_packet.extend(b'\x00' * 20)
+            sock.sendto(kick_packet, (ip, 6672))
+            time.sleep(0.05)
+            sock.sendto(kick_packet, (ip, 6672))
+            sock.close()
+            print(f"[踢人] 已发送踢人包到 {ip}")
+            return True
+        except Exception as e:
+            print(f"[踢人] 失败: {e}")
+            return False
 
     def is_blocked(self, ip):
         with self.lock:
@@ -570,22 +850,13 @@ class OnDemandBlocker:
             return result
 
     def stop(self):
+        """完全停止阻断功能（非阻塞）"""
         with self.lock:
-            if not self.running:
-                return
-            self.running = False
-            # 尝试发送停止信号（可选，但可能无效）
-            if self.cmd_queue:
-                try:
-                    self.cmd_queue.put(None, timeout=0.1)
-                except:
-                    pass
-            # 强制终止子进程
-            if self.process and self.process.is_alive():
-                self.process.terminate()
-                self.process.join(0.2)  # 短暂等待清理
-            self.process = None
-            self.cmd_queue = None
+            self._stop_check_thread()
+            self._stop_internal()
+            self.blocked_ips.clear()
+            self.temp_blocked.clear()
+
 
 # ====================== 进程监控线程（挂逼崩溃检测） ======================
 class ProcessMonitorThread(QThread):
@@ -636,6 +907,7 @@ class ProcessMonitorThread(QThread):
     def stop(self):
         self.running = False
 
+
 # ====================== 加速器检测线程 ======================
 class AcceleratorTestThread(QThread):
     output = pyqtSignal(str)
@@ -645,8 +917,13 @@ class AcceleratorTestThread(QThread):
         super().__init__()
         self.phy_ip = phy_ip
         self.virt_ip = virt_ip
+        self.running = True
+
+    def stop(self):
+        self.running = False
 
     def run(self):
+        w = None
         try:
             import pydivert
             self.output.emit("=" * 70)
@@ -656,48 +933,97 @@ class AcceleratorTestThread(QThread):
             self.output.emit("=" * 70)
             self.output.emit("请确保游戏处于在线战局并有其他玩家...")
             self.output.emit("检测将持续10秒...")
+
             phy_packets = set()
             virt_packets = set()
             official_ips = TRADE_SERVER_IPS | CLOUD_SAVE_SERVER_IPS
+
             port_list = ' or '.join(f'(udp.SrcPort == {p} or udp.DstPort == {p})' for p in UDP_PORTS_TO_MONITOR)
             filter_str = f"({port_list}) and ip"
-            with pydivert.WinDivert(filter_str) as w:
-                start_time = time.time()
-                for packet in w:
-                    if time.time() - start_time > 10:
-                        break
+
+            self.output.emit("正在启动网络过滤器...")
+            w = pydivert.WinDivert(filter_str)
+            w.open()
+            self.output.emit("过滤器已启动，开始捕获数据包...")
+
+            start_time = time.time()
+            packet_count = 0
+            timeout_count = 0
+
+            while self.running and (time.time() - start_time) < 10:
+                try:
+                    packet = w.recv(timeout=100)
+                    if packet is None:
+                        timeout_count += 1
+                        if timeout_count % 10 == 0:
+                            self.output.emit(f"等待数据包... (已等待 {int(time.time() - start_time)} 秒)")
+                        continue
+                    timeout_count = 0
+
+                    packet_count += 1
+                    if packet_count % 5 == 0:
+                        self.output.emit(f"已捕获 {packet_count} 个数据包...")
+
                     if packet.udp is None:
                         w.send(packet)
                         continue
+
                     src_ip = packet.src_addr
                     dst_ip = packet.dst_addr
+
                     if src_ip == self.phy_ip or src_ip == self.virt_ip:
                         remote = dst_ip
                     else:
                         remote = src_ip
+
                     if remote in official_ips:
                         w.send(packet)
                         continue
+
+                    is_rockstar = False
                     for r in ROCKSTAR_IP_RANGES:
                         if remote.startswith(r):
-                            w.send(packet)
-                            continue
+                            is_rockstar = True
+                            break
+                    if is_rockstar:
+                        w.send(packet)
+                        continue
+
                     if remote.startswith(('224.', '239.', '255.', '127.', '0.')):
                         w.send(packet)
                         continue
+
                     if src_ip == self.phy_ip or dst_ip == self.phy_ip:
                         phy_packets.add(remote)
                     if src_ip == self.virt_ip or dst_ip == self.virt_ip:
                         virt_packets.add(remote)
+
                     w.send(packet)
+
+                except Exception as e:
+                    if "timeout" in str(e).lower():
+                        continue
+                    else:
+                        self.output.emit(f"处理数据包时出错: {e}")
+                        break
+
             self.output.emit("")
             self.output.emit("=" * 70)
             self.output.emit("检测结果")
             self.output.emit("=" * 70)
             self.output.emit(f"物理网卡({self.phy_ip}) 检测到 {len(phy_packets)} 个P2P连接")
             self.output.emit(f"虚拟网卡({self.virt_ip}) 检测到 {len(virt_packets)} 个P2P连接")
+            self.output.emit(f"总共捕获 {packet_count} 个数据包")
             self.output.emit("")
-            if len(virt_packets) == 0 and len(phy_packets) == 0:
+
+            if packet_count == 0:
+                self.output.emit("⚠️ 警告: 未捕获到任何数据包")
+                self.output.emit("可能原因:")
+                self.output.emit("  - 游戏未进入在线战局")
+                self.output.emit("  - 战局无其他玩家")
+                self.output.emit("  - IP地址配置错误")
+                self.output.emit("  - 杀毒软件/防火墙阻止了WinDivert")
+            elif len(virt_packets) == 0 and len(phy_packets) == 0:
                 self.output.emit("⚠️ 警告: 两个网卡均未检测到P2P游戏连接")
                 self.output.emit("可能原因: 游戏未进入在线战局 / 战局无其他玩家 / IP地址错误")
             elif len(virt_packets) > 0 and len(phy_packets) > 0:
@@ -715,11 +1041,22 @@ class AcceleratorTestThread(QThread):
             elif len(phy_packets) > len(virt_packets) * 3:
                 self.output.emit("⚠️⚠️⚠️ 加速器状态: 可能为假加速 ⚠️⚠️⚠️")
                 self.output.emit("建议：更换加速器或联系客服")
+
             self.output.emit("")
             self.output.emit("=" * 70)
+
         except Exception as e:
             self.output.emit(f"检测出错: {e}")
-        self.finished_signal.emit()
+            import traceback
+            self.output.emit(traceback.format_exc())
+        finally:
+            if w:
+                try:
+                    w.close()
+                except:
+                    pass
+            self.finished_signal.emit()
+
 
 # ====================== 战局管理器 ======================
 class SessionManager:
@@ -745,7 +1082,7 @@ class SessionManager:
         self.solo_running = False
         if self.solo_process and self.solo_process.is_alive():
             self.solo_process.terminate()
-            self.solo_process.join()
+            self.solo_process.join(0.5)
         return True, "卡单人战局已停止"
 
     def start_locked_session(self):
@@ -764,8 +1101,9 @@ class SessionManager:
         self.locked_running = False
         if self.locked_process and self.locked_process.is_alive():
             self.locked_process.terminate()
-            self.locked_process.join()
+            self.locked_process.join(0.5)
         return True, "战局锁已停止"
+
 
 # ====================== 战局管理选项卡 ======================
 class SessionControlTab(QWidget):
@@ -806,7 +1144,6 @@ class SessionControlTab(QWidget):
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(150)
         log_layout.addWidget(self.log_text)
         layout.addWidget(log_group)
 
@@ -859,19 +1196,45 @@ class SessionControlTab(QWidget):
         else:
             QMessageBox.warning(self, "警告", msg)
 
+
 # ====================== 主窗口 ======================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
-        self.resize(1400, 850)
+
+        # 设置窗口默认启动大小
+        self.resize(1100, 650)
 
         # 设置窗口图标
         icon_path = get_icon_path()
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # 选择本地IP（对话框无父窗口，独立弹出）
+        # 检查驱动状态
+        self.driver_available = check_driver_available()
+        if not self.driver_available:
+            print("[主程序] 驱动不可用，尝试安装...")
+            self.driver_available = ensure_windivert_driver()
+
+            if not self.driver_available:
+                QMessageBox.warning(self, "WinDivert 驱动不可用",
+                                    "WinDivert 驱动加载失败！\n\n"
+                                    "以下功能将被禁用：\n"
+                                    "• 阻断连接（临时阻断、黑名单）\n"
+                                    "• 战局管理（卡单人战局、战局锁）\n"
+                                    "• 加速器检测\n\n"
+                                    "请尝试以下解决方法：\n"
+                                    "1. 以管理员身份重新运行本程序\n"
+                                    "2. 检查杀毒软件是否阻止了 WinDivert 驱动\n"
+                                    "3. 手动安装 WinDivert 驱动：\n"
+                                    "   https://github.com/basil00/Divert/releases")
+            else:
+                QMessageBox.information(self, "驱动安装成功",
+                                        "WinDivert 驱动已成功安装！\n\n"
+                                        "所有功能现在可用。")
+
+        # 选择本地IP
         global LOCAL_IP
         LOCAL_IP = self.get_user_input_ip()
         if not LOCAL_IP:
@@ -889,12 +1252,14 @@ class MainWindow(QMainWindow):
         threading.Thread(target=sampler, daemon=True).start()
         threading.Thread(target=port_scanner, daemon=True).start()
 
-        # 阻断器
+        # 阻断器（按需启动）
         self.blocker = OnDemandBlocker()
         self.blocker.set_local_ip(LOCAL_IP)
-        self.blocker.start()
-        for ip in self.permanent_blacklist:
-            self.blocker.block_ip(ip, permanent=True)
+        if self.driver_available and self.permanent_blacklist:
+            for ip in self.permanent_blacklist:
+                self.blocker.block_ip(ip, permanent=True)
+        elif not self.driver_available:
+            print("[主程序] 驱动不可用，阻断器未启动")
 
         # 进程监控
         self.proc_monitor = ProcessMonitorThread()
@@ -903,6 +1268,10 @@ class MainWindow(QMainWindow):
 
         # 界面
         self.setup_ui()
+
+        # 根据驱动状态禁用相关功能
+        if not self.driver_available:
+            self.disable_windivert_features()
 
         # 定时刷新显示
         self.refresh_timer = QTimer()
@@ -916,45 +1285,163 @@ class MainWindow(QMainWindow):
         self.crash_detection_enabled = False
         self.show_private_ip = False
 
-        # 最后显示主窗口
         self.show()
 
+    # ====================== 通用工具函数 ======================
+    def get_text_dialog(self, title, label, placeholder="", parent=None):
+        """显示带中文按钮的输入对话框，返回用户输入的文本，取消返回 None"""
+        dialog = QDialog(parent or self)
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+
+        layout = QVBoxLayout(dialog)
+
+        input_label = QLabel(label)
+        layout.addWidget(input_label)
+
+        input_edit = QLineEdit()
+        input_edit.setPlaceholderText(placeholder)
+        layout.addWidget(input_edit)
+
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("确定")
+        cancel_btn = QPushButton("取消")
+
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        ok_btn.setDefault(True)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return input_edit.text().strip()
+        return None
+
+    def show_question_dialog(self, title, text, default_no=True):
+        """显示带中文按钮的是/否对话框，返回 True 表示用户点击了"是" """
+        yes_btn = QPushButton("是")
+        no_btn = QPushButton("否")
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(text)
+        msg_box.setIcon(QMessageBox.Icon.Question)
+        msg_box.addButton(yes_btn, QMessageBox.ButtonRole.YesRole)
+        msg_box.addButton(no_btn, QMessageBox.ButtonRole.NoRole)
+        msg_box.setDefaultButton(no_btn if default_no else yes_btn)
+
+        msg_box.exec()
+        return msg_box.clickedButton() == yes_btn
+
+    def disable_windivert_features(self):
+        """禁用依赖于 WinDivert 的功能"""
+
+        # ==================== 禁用战局管理相关 ====================
+        self.session_tab.solo_start_btn.setEnabled(False)
+        self.session_tab.solo_stop_btn.setEnabled(False)
+        self.session_tab.locked_start_btn.setEnabled(False)
+        self.session_tab.locked_stop_btn.setEnabled(False)
+
+        self.session_tab.solo_start_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+        self.session_tab.solo_stop_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+        self.session_tab.locked_start_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+        self.session_tab.locked_stop_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+
+        self.session_tab.solo_start_btn.setStyleSheet("QPushButton { color: gray; }")
+        self.session_tab.solo_stop_btn.setStyleSheet("QPushButton { color: gray; }")
+        self.session_tab.locked_start_btn.setStyleSheet("QPushButton { color: gray; }")
+        self.session_tab.locked_stop_btn.setStyleSheet("QPushButton { color: gray; }")
+
+        self.session_tab.solo_status_label.setText("❌ 不可用")
+        self.session_tab.solo_status_label.setStyleSheet("color: gray;")
+        self.session_tab.locked_status_label.setText("❌ 不可用")
+        self.session_tab.locked_status_label.setStyleSheet("color: gray;")
+
+        self.session_tab.log_text.append("⚠️ WinDivert 驱动不可用，战局管理功能已禁用")
+
+        # ==================== 禁用阻断连接相关 ====================
+        self.temp_block_btn.setEnabled(False)
+        self.temp_block_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+        self.temp_block_btn.setStyleSheet("QPushButton { color: gray; }")
+
+        self.blacklist_enabled.setEnabled(False)
+        self.blacklist_enabled.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+        self.blacklist_enabled.setStyleSheet("QCheckBox { color: gray; }")
+
+        # 禁用"添加IP到黑名单"按钮
+        if hasattr(self, 'add_bl_btn'):
+            self.add_bl_btn.setEnabled(False)
+            self.add_bl_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+            self.add_bl_btn.setStyleSheet("QPushButton { color: gray; }")
+
+        # 禁用"从黑名单移除"按钮
+        if hasattr(self, 'remove_bl_btn'):
+            self.remove_bl_btn.setEnabled(False)
+            self.remove_bl_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+            self.remove_bl_btn.setStyleSheet("QPushButton { color: gray; }")
+
+        # 在阻断列表显示提示
+        self.block_table.setRowCount(1)
+        self.block_table.setItem(0, 0, QTableWidgetItem("⚠ 驱动不可用"))
+        self.block_table.setItem(0, 1, QTableWidgetItem("功能已禁用"))
+        self.block_table.setItem(0, 2, QTableWidgetItem(""))
+        self.block_table.item(0, 0).setForeground(QBrush(QColor(255, 100, 100)))
+
+        # ==================== 禁用加速器检测 ====================
+        self.detect_btn.setEnabled(False)
+        self.detect_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
+        self.detect_btn.setStyleSheet("QPushButton { color: gray; }")
+
+        self.acc_output.setPlainText(
+            "⚠️ WinDivert 驱动不可用\n\n加速器检测功能已禁用。\n\n请以管理员身份重新运行程序，\n或检查杀毒软件是否阻止了 WinDivert 驱动。")
+
+        # ==================== 状态栏提示 ====================
+        self.driver_status_label = QLabel("⚠ WinDivert 驱动不可用，部分功能已禁用")
+        self.driver_status_label.setStyleSheet("color: #FF6B6B; font-weight: bold; padding: 2px 10px;")
+        self.statusBar().addPermanentWidget(self.driver_status_label)
+
     def on_temp_block_ip(self):
-        ip, ok = QInputDialog.getText(self, "临时阻断IP", "请输入要临时阻断的IP地址（30秒后自动解除）:")
-        if ok and ip:
-            try:
-                socket.inet_aton(ip)
-                self.blocker.block_ip(ip, permanent=False, duration_sec=30)
-                self.update_block_table()
-                QMessageBox.information(self, "成功", f"已临时阻断IP {ip}，30秒后将自动解除")
-            except socket.error:
-                QMessageBox.warning(self, "错误", "无效的IP地址格式")
+        if not self.driver_available:
+            QMessageBox.warning(self, "功能不可用",
+                                "WinDivert 驱动不可用，无法使用临时阻断功能。\n\n"
+                                "请以管理员身份重新运行程序。")
+            return
+
+        ip = self.get_text_dialog("临时阻断IP", "请输入要临时阻断的IP地址（30秒后自动解除）：", "例如: 114.114.114.114")
+        if ip is None:
+            return
+        try:
+            socket.inet_aton(ip)
+            self.blocker.block_ip(ip, permanent=False, duration_sec=30)
+            self.update_block_table()
+            QMessageBox.information(self, "成功", f"已临时阻断IP {ip}，30秒后将自动解除")
+        except socket.error:
+            QMessageBox.warning(self, "错误", "无效的IP地址格式")
 
     def get_user_input_ip(self):
-        # 使用本地 INI 文件存储配置（位于程序目录）
         config_file = os.path.join(get_base_path(), "config.ini")
-        settings = QSettings(config_file, QSettings.IniFormat)
+        settings = QSettings(config_file, QSettings.Format.IniFormat)
         remember = settings.value("RememberIP", False, type=bool)
         last_ip = settings.value("LastSelectedIP", "", type=str)
 
-        # 获取当前所有可用IP
         current_ips = []
         for name, addrs in psutil.net_if_addrs().items():
             for addr in addrs:
                 if addr.family == socket.AF_INET and not addr.address.startswith("127."):
                     current_ips.append(addr.address)
 
-        # 如果设置了“记住”且上次IP有效，则直接使用
         if remember and last_ip and last_ip in current_ips:
             print(f"使用上次选择的 IP: {last_ip}")
             return last_ip
 
-        # 弹出对话框
         dialog = QDialog(self)
         dialog.setWindowTitle("选择监控的本地IP")
         dialog.setModal(True)
-        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
         font = dialog.font()
         font.setPointSize(11)
@@ -984,13 +1471,19 @@ class MainWindow(QMainWindow):
         remember_checkbox.setChecked(remember)
         layout.addWidget(remember_checkbox)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        # 创建中文按钮
+        ok_btn = QPushButton("确定")
+        cancel_btn = QPushButton("取消")
+
+        btn_box = QDialogButtonBox()
+        btn_box.addButton(ok_btn, QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_box.addButton(cancel_btn, QDialogButtonBox.ButtonRole.RejectRole)
         btn_box.setFont(font)
         btn_box.accepted.connect(dialog.accept)
         btn_box.rejected.connect(dialog.reject)
         layout.addWidget(btn_box)
 
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             selected_ip = combo.currentData()
             if not selected_ip:
                 QMessageBox.critical(self, "错误", "未选择有效IP，程序退出")
@@ -1028,7 +1521,6 @@ class MainWindow(QMainWindow):
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setFont(QFont("Consolas", 10))
-        self.console.setStyleSheet("background-color: white; color: black;")
         layout.addWidget(self.console)
 
         btn_layout = QHBoxLayout()
@@ -1039,6 +1531,10 @@ class MainWindow(QMainWindow):
         self.refresh_geo_btn.clicked.connect(self.on_refresh_geo)
         btn_layout.addWidget(self.crash_btn)
         btn_layout.addWidget(self.refresh_geo_btn)
+
+        self.forget_ip_btn = QPushButton("忘记记住的IP")
+        self.forget_ip_btn.clicked.connect(self.on_forget_ip)
+        btn_layout.addWidget(self.forget_ip_btn)
 
         tip = QLabel("卡逼判定：平均速率>100KB/s 或 峰值>100KB/s")
         tip.setStyleSheet("color: gray;")
@@ -1077,7 +1573,7 @@ class MainWindow(QMainWindow):
         self.block_table = QTableWidget()
         self.block_table.setColumnCount(3)
         self.block_table.setHorizontalHeaderLabels(["IP地址", "状态", "操作"])
-        self.block_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.block_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         block_layout.addWidget(self.block_table)
 
         temp_block_btn_layout = QHBoxLayout()
@@ -1097,26 +1593,39 @@ class MainWindow(QMainWindow):
         self.blacklist_table = QTableWidget()
         self.blacklist_table.setColumnCount(2)
         self.blacklist_table.setHorizontalHeaderLabels(["IP地址", "操作"])
-        self.blacklist_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.blacklist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.refresh_blacklist_table()
         blacklist_layout.addWidget(self.blacklist_table)
 
         bl_btn_layout = QHBoxLayout()
-        add_bl_btn = QPushButton("添加IP到黑名单")
-        add_bl_btn.clicked.connect(self.on_add_to_blacklist)
-        remove_bl_btn = QPushButton("从黑名单移除")
-        remove_bl_btn.clicked.connect(self.on_remove_from_blacklist)
-        bl_btn_layout.addWidget(add_bl_btn)
-        bl_btn_layout.addWidget(remove_bl_btn)
+        self.add_bl_btn = QPushButton("添加IP到黑名单")
+        self.add_bl_btn.clicked.connect(self.on_add_to_blacklist)
+        self.remove_bl_btn = QPushButton("从黑名单移除")
+        self.remove_bl_btn.clicked.connect(self.on_remove_from_blacklist)
+        bl_btn_layout.addWidget(self.add_bl_btn)
+        bl_btn_layout.addWidget(self.remove_bl_btn)
         blacklist_layout.addLayout(bl_btn_layout)
         right_layout.addWidget(blacklist_group)
+
+        forget_group = QGroupBox("IP设置")
+        forget_layout = QVBoxLayout(forget_group)
+
+        self.forget_ip_setting_btn = QPushButton("忘记记住的IP地址")
+        self.forget_ip_setting_btn.clicked.connect(self.on_forget_ip)
+        forget_layout.addWidget(self.forget_ip_setting_btn)
+
+        forget_tip = QLabel("点击后将清除已记住的IP地址，\n下次启动将重新选择")
+        forget_tip.setStyleSheet("color: gray; font-size: 9px;")
+        forget_layout.addWidget(forget_tip)
+
+        right_layout.addWidget(forget_group)
 
         return right_widget
 
     def setup_accelerator_tab(self):
         layout = QVBoxLayout(self.acc_tab)
 
-        tip_label = QLabel("注意：此检测功能仅适用于“路由模式”的加速器。\n"
+        tip_label = QLabel("注意：此检测功能仅适用于\"路由模式\"的加速器。\n"
                            "如果您使用进程模式加速，将无法检测。")
         tip_label.setWordWrap(True)
         tip_label.setStyleSheet("color: orange; background-color: #FFF3CD; border: 1px solid #FFEEBA; padding: 5px;")
@@ -1127,8 +1636,7 @@ class MainWindow(QMainWindow):
         self.nic_table = QTableWidget()
         self.nic_table.setColumnCount(3)
         self.nic_table.setHorizontalHeaderLabels(["接口名称", "IP地址", "类型"])
-        self.nic_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.refresh_nic_table()
+        self.nic_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         info_layout.addWidget(self.nic_table)
         refresh_nic_btn = QPushButton("刷新网卡信息")
         refresh_nic_btn.clicked.connect(self.refresh_nic_table)
@@ -1150,7 +1658,6 @@ class MainWindow(QMainWindow):
         self.acc_output = QTextEdit()
         self.acc_output.setReadOnly(True)
         self.acc_output.setFont(QFont("Consolas", 9))
-        self.acc_output.setMinimumHeight(250)
         output_layout.addWidget(self.acc_output)
         layout.addWidget(output_group)
 
@@ -1189,7 +1696,23 @@ class MainWindow(QMainWindow):
             self.blacklist_table.setCellWidget(row, 1, remove_btn)
 
     # ------------------- 槽函数 -------------------
+    def on_forget_ip(self):
+        if self.show_question_dialog("确认忘记IP", "确定要忘记已记住的IP地址吗？\n\n下次启动程序时将会重新选择IP。"):
+            config_file = os.path.join(get_base_path(), "config.ini")
+            settings = QSettings(config_file, QSettings.Format.IniFormat)
+            settings.remove("RememberIP")
+            settings.remove("LastSelectedIP")
+            settings.sync()
+            QMessageBox.information(self, "成功", "已忘记记住的IP地址，下次启动将重新选择")
+
     def on_blacklist_toggled(self, checked):
+        if not self.driver_available:
+            QMessageBox.warning(self, "功能不可用",
+                                "WinDivert 驱动不可用，无法使用黑名单功能。\n\n"
+                                "请以管理员身份重新运行程序。")
+            self.blacklist_enabled.setChecked(False)
+            return
+
         if checked:
             for ip in self.permanent_blacklist:
                 self.blocker.block_ip(ip, permanent=True)
@@ -1200,19 +1723,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "黑名单", "已禁用黑名单，所有IP已解除阻断")
 
     def on_add_to_blacklist(self):
-        ip, ok = QInputDialog.getText(self, "添加IP", "请输入要拉黑的IP地址:")
-        if ok and ip:
-            try:
-                socket.inet_aton(ip)
-                self.permanent_blacklist.add(ip)
-                self.save_blacklist()
-                self.refresh_blacklist_table()
-                if self.blacklist_enabled.isChecked():
-                    self.blocker.block_ip(ip, permanent=True)
-                self.status_label.setText(f"监控IP: {LOCAL_IP} | 端口: {sorted(UDP_PORTS_TO_MONITOR)} | 临时阻断: 0 | 永久黑名单: {len(self.permanent_blacklist)}")
-                QMessageBox.information(self, "成功", f"已将 {ip} 添加到黑名单")
-            except:
-                QMessageBox.warning(self, "错误", "无效的IP地址格式")
+        if not self.driver_available:
+            QMessageBox.warning(self, "功能不可用",
+                                "WinDivert 驱动不可用，无法添加黑名单。\n\n"
+                                "请以管理员身份重新运行程序。")
+            return
+
+        ip = self.get_text_dialog("添加IP到黑名单", "请输入要拉黑的IP地址：", "例如: 192.168.1.100")
+        if ip is None:
+            return
+        try:
+            socket.inet_aton(ip)
+            self.permanent_blacklist.add(ip)
+            self.save_blacklist()
+            self.refresh_blacklist_table()
+            if self.blacklist_enabled.isChecked():
+                self.blocker.block_ip(ip, permanent=True)
+            self.status_label.setText(
+                f"监控IP: {LOCAL_IP} | 端口: {sorted(UDP_PORTS_TO_MONITOR)} | 临时阻断: 0 | 永久黑名单: {len(self.permanent_blacklist)}")
+            QMessageBox.information(self, "成功", f"已将 {ip} 添加到黑名单")
+        except:
+            QMessageBox.warning(self, "错误", "无效的IP地址格式")
 
     def on_remove_from_blacklist(self):
         selected = self.blacklist_table.selectedItems()
@@ -1231,7 +1762,8 @@ class MainWindow(QMainWindow):
             self.refresh_blacklist_table()
             if self.blacklist_enabled.isChecked():
                 self.blocker.unblock_ip(ip)
-            self.status_label.setText(f"监控IP: {LOCAL_IP} | 端口: {sorted(UDP_PORTS_TO_MONITOR)} | 临时阻断: 0 | 永久黑名单: {len(self.permanent_blacklist)}")
+            self.status_label.setText(
+                f"监控IP: {LOCAL_IP} | 端口: {sorted(UDP_PORTS_TO_MONITOR)} | 临时阻断: 0 | 永久黑名单: {len(self.permanent_blacklist)}")
             QMessageBox.information(self, "成功", f"已将 {ip} 从黑名单移除")
 
     def update_block_table(self):
@@ -1285,9 +1817,8 @@ class MainWindow(QMainWindow):
     def on_process_exited(self, recent_ips):
         if recent_ips:
             msg = "游戏进程已退出\n\n退出前3秒内新连接的IP:\n" + "\n".join(recent_ips)
-            reply = QMessageBox.question(self, "检测到新IP", msg + "\n\n是否将这些IP添加到黑名单？",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
+
+            if self.show_question_dialog("检测到新IP", msg + "\n\n是否将这些IP添加到黑名单？"):
                 for ip in recent_ips:
                     self.permanent_blacklist.add(ip)
                 self.save_blacklist()
@@ -1298,7 +1829,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "成功", f"已将 {len(recent_ips)} 个IP添加到黑名单")
 
     def on_show_private_changed(self, state):
-        self.show_private_ip = (state == Qt.Checked)
+        self.show_private_ip = (state == Qt.CheckState.Checked)
         self.refresh_display()
 
     def auto_refresh_unknown_geo(self):
@@ -1404,17 +1935,37 @@ class MainWindow(QMainWindow):
         self.console.setText("\n".join(lines))
 
     def on_detect_accelerator(self):
+        if not self.driver_available:
+            QMessageBox.warning(self, "功能不可用",
+                                "WinDivert 驱动不可用，无法使用加速器检测功能。\n\n"
+                                "请以管理员身份重新运行程序。")
+            return
+
         phy_ip = self.phy_ip_edit.text().strip()
         virt_ip = self.virt_ip_edit.text().strip()
         if not phy_ip or not virt_ip:
             QMessageBox.warning(self, "警告", "请填写物理网卡IP和虚拟网卡IP")
             return
+
+        if hasattr(self, 'acc_test_thread') and self.acc_test_thread.isRunning():
+            self.acc_test_thread.stop()
+            self.acc_test_thread.wait()
+            self.detect_btn.setText("开始检测加速器")
+            self.acc_output.append("\n⚠️ 检测已停止")
+            return
+
         self.acc_output.clear()
         self.detect_btn.setEnabled(False)
+        self.detect_btn.setText("停止检测")
+
         self.acc_test_thread = AcceleratorTestThread(phy_ip, virt_ip)
         self.acc_test_thread.output.connect(self.acc_output.append)
-        self.acc_test_thread.finished_signal.connect(lambda: self.detect_btn.setEnabled(True))
+        self.acc_test_thread.finished_signal.connect(self.on_accelerator_test_finished)
         self.acc_test_thread.start()
+
+    def on_accelerator_test_finished(self):
+        self.detect_btn.setEnabled(self.driver_available)
+        self.detect_btn.setText("开始检测加速器")
 
     def closeEvent(self, event):
         global running
@@ -1423,29 +1974,305 @@ class MainWindow(QMainWindow):
         self.blocker.stop()
         event.accept()
 
+
+# ====================== 系统主题检测 ======================
+def get_system_theme():
+    """检测 Windows 系统主题（深色/浅色）"""
+    if sys.platform != "win32":
+        return "light"
+
+    try:
+        import winreg
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return "dark" if value == 0 else "light"
+        except:
+            return "light"
+    except:
+        return "light"
+
+
+def apply_theme(app, theme):
+    """应用主题样式"""
+    if theme == "dark":
+        dark_style = """
+        QWidget {
+            background-color: #1e1e1e;
+            color: #ffffff;
+        }
+        QMainWindow {
+            background-color: #1e1e1e;
+        }
+        QTextEdit {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            border: 1px solid #3d3d3d;
+        }
+        QTextEdit:read-only {
+            background-color: #252526;
+        }
+        QPushButton {
+            background-color: #3d3d3d;
+            color: #ffffff;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 5px 10px;
+        }
+        QPushButton:hover {
+            background-color: #4d4d4d;
+            border-color: #666666;
+        }
+        QPushButton:pressed {
+            background-color: #2d2d2d;
+        }
+        QPushButton:disabled {
+            background-color: #2d2d2d;
+            color: #666666;
+        }
+        QPushButton:checked {
+            background-color: #4a4a4a;
+            border-color: #0078d4;
+        }
+        QPushButton:checked:hover {
+            background-color: #5a5a5a;
+        }
+        QTableWidget {
+            background-color: #252526;
+            color: #d4d4d4;
+            gridline-color: #3d3d3d;
+            border: 1px solid #3d3d3d;
+        }
+        QTableWidget::item {
+            background-color: #252526;
+        }
+        QTableWidget::item:selected {
+            background-color: #0078d4;
+            color: #ffffff;
+        }
+        QHeaderView::section {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            border: 1px solid #3d3d3d;
+            padding: 4px;
+        }
+        QGroupBox {
+            color: #ffffff;
+            border: 1px solid #3d3d3d;
+            border-radius: 5px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        QLabel {
+            color: #d4d4d4;
+        }
+        QCheckBox {
+            color: #d4d4d4;
+        }
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+        }
+        QCheckBox::indicator:unchecked {
+            background-color: #3d3d3d;
+            border: 1px solid #555555;
+            border-radius: 3px;
+        }
+        QCheckBox::indicator:unchecked:hover {
+            background-color: #4d4d4d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #0078d4;
+            border: 1px solid #0078d4;
+            border-radius: 3px;
+        }
+        QCheckBox::indicator:checked:hover {
+            background-color: #1a8ad4;
+        }
+        QComboBox {
+            background-color: #3d3d3d;
+            color: #d4d4d4;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 5px;
+        }
+        QComboBox:hover {
+            border-color: #666666;
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            selection-background-color: #0078d4;
+            selection-color: #ffffff;
+        }
+        QTabWidget::pane {
+            border: 1px solid #3d3d3d;
+            background-color: #1e1e1e;
+        }
+        QTabBar::tab {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            padding: 8px 15px;
+            border: 1px solid #3d3d3d;
+            border-bottom: none;
+            margin-right: 2px;
+        }
+        QTabBar::tab:selected {
+            background-color: #3d3d3d;
+            color: #ffffff;
+            border-bottom: 2px solid #0078d4;
+        }
+        QTabBar::tab:hover {
+            background-color: #4d4d4d;
+        }
+        QLineEdit {
+            background-color: #3d3d3d;
+            color: #d4d4d4;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 5px;
+        }
+        QLineEdit:focus {
+            border-color: #0078d4;
+        }
+        QScrollBar:vertical {
+            background-color: #2d2d2d;
+            width: 12px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:vertical {
+            background-color: #555555;
+            min-height: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background-color: #666666;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QScrollBar:horizontal {
+            background-color: #2d2d2d;
+            height: 12px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:horizontal {
+            background-color: #555555;
+            min-width: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background-color: #666666;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0;
+        }
+        QMenuBar {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+        }
+        QMenuBar::item:selected {
+            background-color: #3d3d3d;
+        }
+        QMenu {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            border: 1px solid #3d3d3d;
+        }
+        QMenu::item:selected {
+            background-color: #0078d4;
+            color: #ffffff;
+        }
+        QStatusBar {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+        }
+        QToolTip {
+            background-color: #2d2d2d;
+            color: #d4d4d4;
+            border: 1px solid #3d3d3d;
+        }
+        QDialog {
+            background-color: #1e1e1e;
+        }
+        QMessageBox {
+            background-color: #1e1e1e;
+        }
+        """
+        app.setStyleSheet(dark_style)
+        print("[主题] 应用深色主题")
+    else:
+        # 浅色主题
+        light_style = """
+        QTextEdit:read-only {
+            background-color: #f8f8f8;
+        }
+        QTableWidget::item:selected {
+            background-color: #0078d4;
+            color: #ffffff;
+        }
+        QGroupBox {
+            border: 1px solid #d0d0d0;
+            border-radius: 5px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        """
+        app.setStyleSheet(light_style)
+        print("[主题] 应用浅色主题")
+
+
 def main():
+    # 设置 DLL 搜索路径
+    set_dll_search_path()
+
     if sys.platform == "win32":
         import ctypes
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                QMessageBox.critical(None, "错误", "请以管理员身份运行！")
+                QMessageBox.critical(None, "错误",
+                                     "本程序需要管理员权限才能正常工作！\n\n"
+                                     "请右键点击程序，选择\"以管理员身份运行\"。")
                 sys.exit(1)
         except:
             pass
+
     app = QApplication(sys.argv)
 
-    # 设置应用程序图标（影响任务栏和标题栏）
+    # ====================== 应用系统主题 ======================
+    theme = get_system_theme()
+    apply_theme(app, theme)
+    # =======================================================
+
     icon_path = get_icon_path()
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
-    # 设置应用程序用户模型 ID（确保任务栏图标正确显示）
     if sys.platform == "win32":
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GTA5_RDR2_Network_Monitor")
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GTA5_RDR2_Network_Monitor")
+        except:
+            pass
 
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
