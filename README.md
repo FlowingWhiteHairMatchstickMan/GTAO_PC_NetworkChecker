@@ -4,13 +4,9 @@
 请自行权衡风险，因为您可以通过本软件查看其他玩家的 ip 地址。<br>
 本项目使用 MPL-2.0 协议进行分发，若您要使用本软件的代码，请注意协议内容。<br>
 此外，目前已额外支持 Red Dead 在线模式的网络监测功能，在此感谢 k7Ysh5A41。<br>
+新增网络战局锁功能，原理来自 https://gitlab.com/Speyedr/guardian-fastload-fix
 <br>
-English:<br>
-This is a small project to help GTA Online for PC players to check the session's network.Users can check the Peer to Peer network and find if someone is lagging the session.<br>
-This project has no affiliation with Take Two & Rockstar Games.<br>
-This software requires Windows administrator privileges to run.<br>
-Please use as your risk because you can check the ip of other players.<br>
-This project is distributed under the MPL-2.0 license. If you intend to use the code of this software, please pay attention to the license terms.<br>
-Apart from that,now the software supports Red Dead Online's session network checking.Shout out thanks for k7Ysh5A41.<br>
+新增对用户更加友好的 GUI 版本，特别感谢 https://github.com/mageangela 对此提出的建议与支持！
 <br>
-This project is for Simplified Chinese players.If you want to use this project in English or other languages,feel free to create a new branch :)
+AND F**K ALL THE GTAO AND RDRO HACKERS AND CHEATERS!!!
+<br>
