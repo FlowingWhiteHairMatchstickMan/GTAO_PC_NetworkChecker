@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-GTA5/RDR2 网络监控工具 - 整合命令行抓包核心 + GUI 功能
-（PyQt6 版本 - 修复：退出时驱动占用，新增：忘记IP、按需阻断、本地DLL加载、自动安装驱动）
-"""
-
 import sys
 import os
 import socket
@@ -20,10 +13,8 @@ import queue
 import subprocess
 import warnings
 from collections import deque, defaultdict
-
-
+from collections import Counter
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTableWidget, QTableWidgetItem,
                              QPushButton, QLabel, QMessageBox, QHeaderView,
@@ -31,7 +22,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTextEdit, QComboBox, QDialog,
                              QDialogButtonBox, QCheckBox)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QSettings
-from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
+from PyQt6.QtGui import (QColor, QBrush, QFont, QIcon, QPixmap, QPainter,
+                         QImage, QLinearGradient)
 
 
 # ====================== 路径辅助函数 ======================
@@ -46,7 +38,6 @@ def get_base_path():
 
 
 def get_icon_path():
-    """获取图标文件路径（兼容打包）"""
     icon_filename = "ico.ico"
     base = get_base_path()
     icon_path = os.path.join(base, icon_filename)
@@ -58,6 +49,71 @@ def get_icon_path():
     return icon_path
 
 
+# ====================== 图片颜色提取 ======================
+def extract_dominant_colors(image_path, num_colors=5):
+    try:
+        image = QImage(image_path)
+        if image.isNull():
+            return None
+
+        scaled = image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+
+        colors = []
+        for y in range(scaled.height()):
+            for x in range(scaled.width()):
+                color = scaled.pixelColor(x, y)
+                if color.red() < 10 and color.green() < 10 and color.blue() < 10:
+                    continue
+                if color.red() > 245 and color.green() > 245 and color.blue() > 245:
+                    continue
+                colors.append((color.red(), color.green(), color.blue()))
+
+        if not colors:
+            return None
+
+        counter = Counter(colors)
+        most_common = counter.most_common(num_colors)
+
+        result = []
+        for (r, g, b), count in most_common:
+            result.append(QColor(r, g, b))
+
+        return result
+    except Exception as e:
+        print(f"[背景] 颜色提取失败: {e}")
+        return None
+
+
+def generate_gradient_from_image(image_path):
+    colors = extract_dominant_colors(image_path, 5)
+    if not colors or len(colors) < 2:
+        return [
+            QColor(20, 30, 48),
+            QColor(40, 60, 80),
+            QColor(30, 45, 65)
+        ]
+
+    colors.sort(key=lambda c: c.red() + c.green() + c.blue())
+
+    if len(colors) > 3:
+        result = [colors[0]]
+        mid = len(colors) // 2
+        result.append(colors[mid])
+        result.append(colors[-1])
+        return result
+    elif len(colors) == 2:
+        c1, c2 = colors[0], colors[1]
+        mid = QColor(
+            (c1.red() + c2.red()) // 2,
+            (c1.green() + c2.green()) // 2,
+            (c1.blue() + c2.blue()) // 2
+        )
+        return [c1, mid, c2]
+    else:
+        return colors
+
+
 # ====================== DLL 搜索路径设置 ======================
 def set_dll_search_path():
     """将程序所在目录添加到 DLL 搜索路径，确保能找到 WinDivert.dll"""
@@ -65,23 +121,19 @@ def set_dll_search_path():
         return
     base_dir = get_base_path()
     try:
-        # 方法1：添加到 PATH 环境变量（对所有子进程有效）
         path_env = os.environ.get('PATH', '')
         if base_dir not in path_env.split(os.pathsep):
             os.environ['PATH'] = base_dir + os.pathsep + path_env
             print(f"[DLL] 已添加到 PATH: {base_dir}")
 
-        # 方法2：Python 3.8+ 的 add_dll_directory
         if hasattr(os, 'add_dll_directory'):
             os.add_dll_directory(base_dir)
             print(f"[DLL] 已添加搜索路径: {base_dir}")
         else:
-            # 旧版本使用 SetDllDirectoryW
             import ctypes
             ctypes.windll.kernel32.SetDllDirectoryW(base_dir)
             print(f"[DLL] 已设置 DllDirectory: {base_dir}")
 
-        # 方法3：提前加载 DLL（如果存在），确保系统能找到
         dll_path = os.path.join(base_dir, 'WinDivert.dll')
         if os.path.exists(dll_path):
             try:
@@ -100,7 +152,6 @@ def ensure_windivert_driver():
     if sys.platform != "win32":
         return True
 
-    # 首先尝试直接打开过滤器
     try:
         w = pydivert.WinDivert("false")
         w.open()
@@ -110,13 +161,10 @@ def ensure_windivert_driver():
     except Exception as e:
         print(f"[驱动] 驱动未就绪: {e}")
 
-    # 如果失败，尝试安装驱动
     try:
-        # 方法1：使用 pydivert 自带的注册
         if not pydivert.WinDivert.is_registered():
             print("[驱动] 尝试通过 pydivert 注册驱动...")
             pydivert.WinDivert.register()
-        # 验证
         w = pydivert.WinDivert("false")
         w.open()
         w.close()
@@ -125,7 +173,6 @@ def ensure_windivert_driver():
     except Exception as e:
         print(f"[驱动] pydivert 注册失败: {e}")
 
-    # 方法2：使用 windivertctl.exe
     try:
         base = get_base_path()
         ctl_path = os.path.join(base, "windivertctl.exe")
@@ -134,19 +181,15 @@ def ensure_windivert_driver():
             return False
 
         print("[驱动] 使用 windivertctl.exe 安装驱动...")
-        # 先卸载旧驱动
         subprocess.run([ctl_path, "uninstall"], capture_output=True, shell=True, timeout=5)
         time.sleep(0.5)
-        # 安装驱动
         result = subprocess.run([ctl_path, "install"], capture_output=True, text=True, shell=True, timeout=10)
         if result.returncode != 0:
             print(f"[驱动] windivertctl 安装失败: {result.stderr}")
             return False
-        # 启动驱动服务
         subprocess.run(["sc", "start", "windivert"], capture_output=True, shell=True, timeout=5)
         time.sleep(2)
 
-        # 验证
         w = pydivert.WinDivert("false")
         w.open()
         w.close()
@@ -662,7 +705,6 @@ class OnDemandBlocker:
         self.local_ip = ip
 
     def check_driver(self):
-        """检查驱动是否可用 - 每次调用都重新检测"""
         try:
             w = pydivert.WinDivert("false")
             w.open()
@@ -673,7 +715,6 @@ class OnDemandBlocker:
             return False
 
     def _start_internal(self):
-        """内部启动阻断进程（非阻塞）"""
         if self.running:
             return
         if not self.check_driver():
@@ -689,12 +730,10 @@ class OnDemandBlocker:
         )
         self.process.start()
         self.running = True
-        # 启动检查线程
         self._start_check_thread()
         print("[阻断] 阻断进程已按需启动")
 
     def _start_check_thread(self):
-        """启动临时阻断检查线程"""
         if self._check_running:
             return
         self._check_running = True
@@ -702,9 +741,8 @@ class OnDemandBlocker:
         self._check_thread.start()
 
     def _check_temp_blocked(self):
-        """定期检查临时阻断是否超时"""
         while self._check_running and self.running:
-            time.sleep(1)  # 每秒检查一次
+            time.sleep(1)
             now = time.time()
             expired_ips = []
             with self.lock:
@@ -716,7 +754,6 @@ class OnDemandBlocker:
                 self.unblock_ip(ip)
 
     def _stop_check_thread(self):
-        """停止检查线程"""
         self._check_running = False
         if self._check_thread and self._check_thread.is_alive():
             try:
@@ -726,7 +763,6 @@ class OnDemandBlocker:
         self._check_thread = None
 
     def _stop_internal(self, timeout=0.5):
-        """内部停止阻断进程（非阻塞，快速返回）"""
         if not self.running:
             return
 
@@ -762,7 +798,6 @@ class OnDemandBlocker:
             print("[阻断] 阻断进程已停止")
 
     def block_ip(self, ip, permanent=True, duration_sec=30):
-        """添加阻断IP（按需启动，非阻塞）"""
         if not self.check_driver():
             print("[阻断] 驱动不可用，无法阻断")
             return False
@@ -790,7 +825,6 @@ class OnDemandBlocker:
             return False
 
     def unblock_ip(self, ip):
-        """解除阻断IP（自动停止，非阻塞）"""
         if self.running:
             try:
                 self.cmd_queue.put(('unblock', ip), timeout=0.5)
@@ -805,12 +839,10 @@ class OnDemandBlocker:
                 del self.temp_blocked[ip]
                 print(f"[阻断] 已解除临时阻断: {ip}")
 
-        # 如果没有任何IP被阻断，自动停止进程
         if self.running and not self.blocked_ips and not self.temp_blocked:
             self._stop_internal()
 
     def kick_ip(self, ip):
-        """发送踢人包（直接通过UDP发送断开包）"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -850,13 +882,541 @@ class OnDemandBlocker:
             return result
 
     def stop(self):
-        """完全停止阻断功能（非阻塞）"""
         with self.lock:
             self._stop_check_thread()
             self._stop_internal()
             self.blocked_ips.clear()
             self.temp_blocked.clear()
 
+
+# ====================== 背景管理类 ======================
+class BackgroundManager:
+    """管理窗口背景图片和渐变色"""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.background_image = None
+        self.gradient_colors = []
+        self.image_path = None
+        self.bg_mode = "gradient"
+        self.theme_colors = {}
+        self._load_background()
+
+    def _load_background(self):
+        """加载背景图片并提取颜色"""
+        base_path = get_base_path()
+        image_path = os.path.join(base_path, "background.jpg")
+
+        if os.path.exists(image_path):
+            print(f"[背景] 找到背景图片: {image_path}")
+            self.image_path = image_path
+            self.background_image = QPixmap(image_path)
+            if not self.background_image.isNull():
+                colors = generate_gradient_from_image(image_path)
+                if colors and len(colors) >= 2:
+                    self.gradient_colors = colors
+                    self._extract_theme_colors(colors)
+                    print(f"[背景] 从图片提取了 {len(colors)} 种颜色")
+                    for i, c in enumerate(colors):
+                        print(f"[背景] 颜色{i + 1}: RGB({c.red()}, {c.green()}, {c.blue()})")
+                    self.bg_mode = "mixed"
+                    return
+
+        print("[背景] 未找到背景图片，使用默认渐变色")
+        self.gradient_colors = [
+            QColor(20, 30, 48),
+            QColor(40, 60, 80),
+            QColor(30, 45, 65)
+        ]
+        self._extract_theme_colors(self.gradient_colors)
+        self.bg_mode = "gradient"
+
+    def _extract_theme_colors(self, colors):
+        """从提取的颜色中生成主题配色"""
+        if not colors:
+            return
+
+        main_color = colors[-1] if len(colors) >= 1 else QColor(40, 60, 80)
+        accent_color = colors[len(colors) // 2] if len(colors) >= 2 else QColor(30, 45, 65)
+        dark_color = colors[0] if len(colors) >= 1 else QColor(20, 30, 48)
+
+        self.theme_colors = {
+            'main': main_color,
+            'accent': accent_color,
+            'dark': dark_color,
+            'text': QColor(255, 255, 255),
+            'text_secondary': QColor(212, 212, 212),
+            'border': QColor(
+                min(255, main_color.red() + 60),
+                min(255, main_color.green() + 60),
+                min(255, main_color.blue() + 60)
+            ),
+            'hover': QColor(
+                min(255, main_color.red() + 40),
+                min(255, main_color.green() + 40),
+                min(255, main_color.blue() + 40)
+            ),
+            'selected': QColor(0, 120, 212),
+        }
+
+    def get_transparent_style(self):
+        """生成完全透明的样式表"""
+        c = self.theme_colors
+        if not c:
+            return self._get_default_transparent_style()
+
+        main = c['main']
+        accent = c['accent']
+        dark = c['dark']
+        border = c['border']
+        hover = c['hover']
+
+        main_rgba = f"rgba({main.red()}, {main.green()}, {main.blue()}, 80)"
+        main_rgba_dark = f"rgba({dark.red()}, {dark.green()}, {dark.blue()}, 100)"
+        accent_rgba = f"rgba({accent.red()}, {accent.green()}, {accent.blue()}, 100)"
+        border_rgba = f"rgba({border.red()}, {border.green()}, {border.blue()}, 30)"
+        hover_rgba = f"rgba({hover.red()}, {hover.green()}, {hover.blue()}, 120)"
+
+        style = f"""
+        QWidget {{
+            background: transparent;
+            color: rgba(255, 255, 255, 220);
+            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+        }}
+        QMainWindow {{
+            background: transparent;
+        }}
+        QTextEdit {{
+            background: rgba(20, 30, 50, 60);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid {border_rgba};
+            border-radius: 6px;
+            padding: 4px;
+        }}
+        QTextEdit:read-only {{
+            background: rgba(15, 25, 45, 40);
+        }}
+        QTextEdit:focus {{
+            border-color: rgba(0, 120, 212, 80);
+        }}
+        QPushButton {{
+            background: {accent_rgba};
+            color: rgba(255, 255, 255, 220);
+            border: 1px solid {border_rgba};
+            border-radius: 6px;
+            padding: 6px 14px;
+        }}
+        QPushButton:hover {{
+            background: {hover_rgba};
+            border-color: rgba({border.red()}, {border.green()}, {border.blue()}, 60);
+        }}
+        QPushButton:pressed {{
+            background: rgba({dark.red()}, {dark.green()}, {dark.blue()}, 150);
+        }}
+        QPushButton:disabled {{
+            background: rgba(40, 50, 60, 50);
+            color: rgba(136, 136, 136, 100);
+        }}
+        QPushButton:checked {{
+            background: rgba({main.red()}, {main.green()}, {main.blue()}, 120);
+            border-color: #0078d4;
+        }}
+        QTableWidget {{
+            background: rgba(20, 30, 50, 60);
+            color: rgba(212, 212, 212, 200);
+            gridline-color: {border_rgba};
+            border: 1px solid {border_rgba};
+            border-radius: 6px;
+            selection-background-color: rgba(0, 120, 212, 80);
+            selection-color: rgba(255, 255, 255, 220);
+        }}
+        QTableWidget::item {{
+            background: transparent;
+            padding: 4px;
+        }}
+        QTableWidget::item:selected {{
+            background: rgba(0, 120, 212, 80);
+            color: rgba(255, 255, 255, 220);
+        }}
+        QTableWidget::item:hover {{
+            background: rgba(60, 90, 130, 40);
+        }}
+        QHeaderView::section {{
+            background: rgba(40, 60, 80, 60);
+            color: rgba(212, 212, 212, 180);
+            border: 1px solid {border_rgba};
+            padding: 5px;
+            font-weight: bold;
+        }}
+        QTableCornerButton::section {{
+            background: rgba(40, 60, 80, 40);
+        }}
+        QGroupBox {{
+            color: rgba(255, 255, 255, 220);
+            border: 1px solid {border_rgba};
+            border-radius: 8px;
+            margin-top: 10px;
+            padding-top: 12px;
+            background: rgba(20, 30, 50, 40);
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 12px;
+            padding: 0 8px 0 8px;
+            color: rgba(170, 204, 238, 200);
+            font-weight: bold;
+        }}
+        QLabel {{
+            color: rgba(212, 212, 212, 200);
+            background: transparent;
+        }}
+        QCheckBox {{
+            color: rgba(212, 212, 212, 200);
+            background: transparent;
+            spacing: 8px;
+        }}
+        QCheckBox::indicator {{
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
+        }}
+        QCheckBox::indicator:unchecked {{
+            background: rgba(40, 60, 80, 60);
+            border: 1px solid {border_rgba};
+        }}
+        QCheckBox::indicator:unchecked:hover {{
+            background: rgba(60, 80, 100, 80);
+        }}
+        QCheckBox::indicator:checked {{
+            background: rgba(0, 120, 212, 100);
+            border: 1px solid #0078d4;
+        }}
+        QCheckBox::indicator:checked:hover {{
+            background: rgba(0, 140, 232, 120);
+        }}
+        QComboBox {{
+            background: rgba(40, 60, 80, 60);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid {border_rgba};
+            border-radius: 6px;
+            padding: 5px 10px;
+        }}
+        QComboBox:hover {{
+            border-color: rgba({border.red()}, {border.green()}, {border.blue()}, 60);
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 20px;
+        }}
+        QComboBox::down-arrow {{
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid rgba(200, 200, 200, 120);
+            margin-right: 5px;
+        }}
+        QComboBox QAbstractItemView {{
+            background: rgba(30, 45, 65, 160);
+            color: rgba(212, 212, 212, 200);
+            selection-background-color: rgba(0, 120, 212, 100);
+            selection-color: rgba(255, 255, 255, 220);
+            border: 1px solid {border_rgba};
+        }}
+        QTabWidget::pane {{
+            border: 1px solid {border_rgba};
+            background: rgba(20, 30, 50, 40);
+            border-radius: 8px;
+        }}
+        QTabBar::tab {{
+            background: rgba(40, 60, 80, 50);
+            color: rgba(212, 212, 212, 180);
+            padding: 8px 18px;
+            border: 1px solid {border_rgba};
+            border-bottom: none;
+            margin-right: 2px;
+            border-radius: 6px 6px 0 0;
+        }}
+        QTabBar::tab:selected {{
+            background: rgba(60, 90, 120, 100);
+            color: rgba(255, 255, 255, 220);
+            border-bottom: 2px solid #0078d4;
+        }}
+        QTabBar::tab:hover {{
+            background: rgba(80, 110, 140, 80);
+        }}
+        QLineEdit {{
+            background: rgba(40, 60, 80, 60);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid {border_rgba};
+            border-radius: 6px;
+            padding: 5px 8px;
+        }}
+        QLineEdit:focus {{
+            border-color: rgba(0, 120, 212, 80);
+        }}
+        QLineEdit:disabled {{
+            background: rgba(40, 50, 60, 30);
+            color: rgba(136, 136, 136, 100);
+        }}
+        QScrollBar:vertical {{
+            background: rgba(30, 45, 65, 40);
+            width: 10px;
+            border-radius: 5px;
+            margin: 2px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: rgba(80, 120, 170, 60);
+            min-height: 20px;
+            border-radius: 5px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: rgba(100, 150, 200, 80);
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+        }}
+        QScrollBar:horizontal {{
+            background: rgba(30, 45, 65, 40);
+            height: 10px;
+            border-radius: 5px;
+            margin: 2px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: rgba(80, 120, 170, 60);
+            min-width: 20px;
+            border-radius: 5px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: rgba(100, 150, 200, 80);
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0;
+        }}
+        QMenuBar {{
+            background: rgba(30, 45, 65, 40);
+            color: rgba(212, 212, 212, 200);
+            border: none;
+        }}
+        QMenuBar::item:selected {{
+            background: rgba(60, 90, 120, 80);
+        }}
+        QMenuBar::item:pressed {{
+            background: rgba(60, 90, 120, 100);
+        }}
+        QMenu {{
+            background: rgba(30, 45, 65, 160);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid {border_rgba};
+            border-radius: 6px;
+            padding: 4px;
+        }}
+        QMenu::item {{
+            padding: 6px 20px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background: rgba(0, 120, 212, 80);
+            color: rgba(255, 255, 255, 220);
+        }}
+        QMenu::separator {{
+            height: 1px;
+            background: {border_rgba};
+            margin: 4px 10px;
+        }}
+        QStatusBar {{
+            background: rgba(15, 25, 45, 40);
+            color: rgba(212, 212, 212, 180);
+            border: none;
+        }}
+        QStatusBar::item {{
+            border: none;
+        }}
+        QToolTip {{
+            background: rgba(30, 45, 65, 180);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid {border_rgba};
+            border-radius: 4px;
+            padding: 4px 8px;
+        }}
+        QDialog {{
+            background: rgba(20, 30, 50, 200);
+        }}
+        QMessageBox {{
+            background: rgba(20, 30, 50, 200);
+        }}
+        QMessageBox QPushButton {{
+            min-width: 70px;
+        }}
+        """
+        return style
+
+    def _get_default_transparent_style(self):
+        """默认透明样式（当颜色提取失败时使用）"""
+        return """
+        QWidget {
+            background: transparent;
+            color: rgba(255, 255, 255, 220);
+        }
+        QMainWindow {
+            background: transparent;
+        }
+        QTextEdit {
+            background: rgba(20, 30, 50, 60);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-radius: 6px;
+        }
+        QPushButton {
+            background: rgba(60, 90, 130, 100);
+            color: rgba(255, 255, 255, 220);
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-radius: 6px;
+            padding: 6px 14px;
+        }
+        QPushButton:hover {
+            background: rgba(80, 120, 170, 120);
+        }
+        QPushButton:disabled {
+            background: rgba(40, 50, 60, 50);
+            color: rgba(136, 136, 136, 100);
+        }
+        QTableWidget {
+            background: rgba(20, 30, 50, 60);
+            color: rgba(212, 212, 212, 200);
+            gridline-color: rgba(100, 150, 200, 30);
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-radius: 6px;
+        }
+        QTableWidget::item:selected {
+            background: rgba(0, 120, 212, 80);
+            color: rgba(255, 255, 255, 220);
+        }
+        QGroupBox {
+            color: rgba(255, 255, 255, 220);
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-radius: 8px;
+            margin-top: 10px;
+            padding-top: 12px;
+            background: rgba(20, 30, 50, 40);
+        }
+        QGroupBox::title {
+            color: rgba(170, 204, 238, 200);
+        }
+        QLabel {
+            color: rgba(212, 212, 212, 200);
+            background: transparent;
+        }
+        QCheckBox {
+            color: rgba(212, 212, 212, 200);
+            background: transparent;
+        }
+        QCheckBox::indicator:unchecked {
+            background: rgba(40, 60, 80, 60);
+            border: 1px solid rgba(100, 150, 200, 30);
+        }
+        QCheckBox::indicator:checked {
+            background: rgba(0, 120, 212, 100);
+            border: 1px solid #0078d4;
+        }
+        QComboBox {
+            background: rgba(40, 60, 80, 60);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-radius: 6px;
+        }
+        QTabWidget::pane {
+            border: 1px solid rgba(100, 150, 200, 30);
+            background: rgba(20, 30, 50, 40);
+            border-radius: 8px;
+        }
+        QTabBar::tab {
+            background: rgba(40, 60, 80, 50);
+            color: rgba(212, 212, 212, 180);
+            padding: 8px 18px;
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+        }
+        QTabBar::tab:selected {
+            background: rgba(60, 90, 120, 100);
+            color: rgba(255, 255, 255, 220);
+            border-bottom: 2px solid #0078d4;
+        }
+        QLineEdit {
+            background: rgba(40, 60, 80, 60);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid rgba(100, 150, 200, 30);
+            border-radius: 6px;
+        }
+        QMenuBar {
+            background: rgba(30, 45, 65, 40);
+            color: rgba(212, 212, 212, 200);
+            border: none;
+        }
+        QMenu {
+            background: rgba(30, 45, 65, 160);
+            color: rgba(212, 212, 212, 200);
+            border: 1px solid rgba(100, 150, 200, 30);
+        }
+        QMenu::item:selected {
+            background: rgba(0, 120, 212, 80);
+            color: rgba(255, 255, 255, 220);
+        }
+        QStatusBar {
+            background: rgba(15, 25, 45, 40);
+            color: rgba(212, 212, 212, 180);
+        }
+        QDialog {
+            background: rgba(20, 30, 50, 200);
+        }
+        QMessageBox {
+            background: rgba(20, 30, 50, 200);
+        }
+        """
+
+    def draw_background(self, painter, rect):
+        """绘制背景"""
+        if self.bg_mode == "image" and self.background_image:
+            painter.setOpacity(0.85)
+            painter.drawPixmap(rect, self.background_image.scaled(
+                rect.width(), rect.height(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        elif self.bg_mode == "gradient" and self.gradient_colors:
+            painter.setOpacity(0.9)
+            gradient = QLinearGradient(0, 0, rect.width(), rect.height())
+            if len(self.gradient_colors) >= 3:
+                gradient.setColorAt(0, self.gradient_colors[0])
+                gradient.setColorAt(0.5, self.gradient_colors[1])
+                gradient.setColorAt(1, self.gradient_colors[2])
+            elif len(self.gradient_colors) == 2:
+                gradient.setColorAt(0, self.gradient_colors[0])
+                gradient.setColorAt(1, self.gradient_colors[1])
+            painter.fillRect(rect, QBrush(gradient))
+        elif self.bg_mode == "mixed" and self.background_image and self.gradient_colors:
+            painter.setOpacity(0.8)
+            painter.drawPixmap(rect, self.background_image.scaled(
+                rect.width(), rect.height(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            painter.setOpacity(0.4)
+            gradient = QLinearGradient(0, 0, rect.width(), rect.height())
+            if len(self.gradient_colors) >= 3:
+                c1 = self.gradient_colors[0]
+                c2 = self.gradient_colors[1]
+                c3 = self.gradient_colors[2]
+                gradient.setColorAt(0, QColor(c1.red(), c1.green(), c1.blue(), 60))
+                gradient.setColorAt(0.5, QColor(c2.red(), c2.green(), c2.blue(), 50))
+                gradient.setColorAt(1, QColor(c3.red(), c3.green(), c3.blue(), 40))
+            else:
+                c1 = self.gradient_colors[0]
+                c2 = self.gradient_colors[1] if len(self.gradient_colors) > 1 else self.gradient_colors[0]
+                gradient.setColorAt(0, QColor(c1.red(), c1.green(), c1.blue(), 60))
+                gradient.setColorAt(1, QColor(c2.red(), c2.green(), c2.blue(), 40))
+            painter.fillRect(rect, QBrush(gradient))
+            painter.setOpacity(1.0)
 
 # ====================== 进程监控线程（挂逼崩溃检测） ======================
 class ProcessMonitorThread(QThread):
@@ -1144,6 +1704,33 @@ class SessionControlTab(QWidget):
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                background: rgba(15, 25, 45, 40);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 20);
+                border-radius: 6px;
+            }
+            QTextEdit:read-only {
+                background: rgba(15, 25, 45, 30);
+            }
+            QScrollBar:vertical {
+                background: rgba(30, 45, 65, 30);
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(80, 120, 170, 50);
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(100, 150, 200, 70);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
         log_layout.addWidget(self.log_text)
         layout.addWidget(log_group)
 
@@ -1153,14 +1740,14 @@ class SessionControlTab(QWidget):
         font = tip_label.font()
         font.setPointSize(12)
         tip_label.setFont(font)
-        tip_label.setStyleSheet("color: gray;")
+        tip_label.setStyleSheet("color: rgba(170, 204, 238, 200);")
         layout.addWidget(tip_label)
 
     def start_solo_session(self):
         success, msg = self.session_manager.start_solo_session()
         if success:
             self.solo_status_label.setText("运行中")
-            self.solo_status_label.setStyleSheet("color: green;")
+            self.solo_status_label.setStyleSheet("color: rgba(102, 255, 102, 200);")
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 卡单人战局已启动")
             QMessageBox.information(self, "成功", msg)
         else:
@@ -1170,7 +1757,7 @@ class SessionControlTab(QWidget):
         success, msg = self.session_manager.stop_solo_session()
         if success:
             self.solo_status_label.setText("未启动")
-            self.solo_status_label.setStyleSheet("color: red;")
+            self.solo_status_label.setStyleSheet("color: rgba(255, 102, 102, 200);")
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 卡单人战局已停止")
             QMessageBox.information(self, "成功", msg)
         else:
@@ -1180,7 +1767,7 @@ class SessionControlTab(QWidget):
         success, msg = self.session_manager.start_locked_session()
         if success:
             self.locked_status_label.setText("运行中")
-            self.locked_status_label.setStyleSheet("color: green;")
+            self.locked_status_label.setStyleSheet("color: rgba(102, 255, 102, 200);")
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 战局锁已启动")
             QMessageBox.information(self, "成功", msg)
         else:
@@ -1190,7 +1777,7 @@ class SessionControlTab(QWidget):
         success, msg = self.session_manager.stop_locked_session()
         if success:
             self.locked_status_label.setText("未启动")
-            self.locked_status_label.setStyleSheet("color: red;")
+            self.locked_status_label.setStyleSheet("color: rgba(255, 102, 102, 200);")
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 战局锁已停止")
             QMessageBox.information(self, "成功", msg)
         else:
@@ -1203,15 +1790,22 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
 
-        # 设置窗口默认启动大小
-        self.resize(1100, 650)
+        self.resize(1200, 500)
 
-        # 设置窗口图标
+        # 设置窗口属性以支持透明背景
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self.bg_manager = BackgroundManager(self)
+
+        # ====================== 应用透明样式 ======================
+        transparent_style = self.bg_manager.get_transparent_style()
+        self.setStyleSheet(transparent_style)
+        # =======================================================
+
         icon_path = get_icon_path()
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # 检查驱动状态
         self.driver_available = check_driver_available()
         if not self.driver_available:
             print("[主程序] 驱动不可用，尝试安装...")
@@ -1234,25 +1828,21 @@ class MainWindow(QMainWindow):
                                         "WinDivert 驱动已成功安装！\n\n"
                                         "所有功能现在可用。")
 
-        # 选择本地IP
         global LOCAL_IP
         LOCAL_IP = self.get_user_input_ip()
         if not LOCAL_IP:
             QMessageBox.critical(self, "错误", "未选择有效IP，程序退出")
             sys.exit(1)
 
-        # 初始化黑名单
         self.base_path = get_base_path()
         self.blacklist_file = os.path.join(self.base_path, "permanent_blacklist.txt")
         self.permanent_blacklist = set()
         self.load_blacklist()
 
-        # 启动抓包线程
         threading.Thread(target=sniffer, daemon=True).start()
         threading.Thread(target=sampler, daemon=True).start()
         threading.Thread(target=port_scanner, daemon=True).start()
 
-        # 阻断器（按需启动）
         self.blocker = OnDemandBlocker()
         self.blocker.set_local_ip(LOCAL_IP)
         if self.driver_available and self.permanent_blacklist:
@@ -1261,24 +1851,19 @@ class MainWindow(QMainWindow):
         elif not self.driver_available:
             print("[主程序] 驱动不可用，阻断器未启动")
 
-        # 进程监控
         self.proc_monitor = ProcessMonitorThread()
         self.proc_monitor.process_exited.connect(self.on_process_exited)
         self.proc_monitor.start()
 
-        # 界面
         self.setup_ui()
 
-        # 根据驱动状态禁用相关功能
         if not self.driver_available:
             self.disable_windivert_features()
 
-        # 定时刷新显示
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_display)
         self.refresh_timer.start(UI_REFRESH_RATE * 1000)
 
-        # 阻断列表定时器
         self.block_timer = QTimer()
         self.block_timer.timeout.connect(self.update_block_table)
         self.block_timer.start(1000)
@@ -1287,12 +1872,43 @@ class MainWindow(QMainWindow):
 
         self.show()
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        self.bg_manager.draw_background(painter, rect)
+        painter.end()
+        super().paintEvent(event)
+
     # ====================== 通用工具函数 ======================
     def get_text_dialog(self, title, label, placeholder="", parent=None):
-        """显示带中文按钮的输入对话框，返回用户输入的文本，取消返回 None"""
         dialog = QDialog(parent or self)
         dialog.setWindowTitle(title)
         dialog.setModal(True)
+        dialog.setStyleSheet("""
+            QDialog { background: rgba(20, 30, 50, 200); }
+            QLabel { color: rgba(212, 212, 212, 200); }
+            QLineEdit {
+                background: rgba(40, 60, 80, 80);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 5px;
+            }
+            QLineEdit:focus {
+                border-color: #0078d4;
+            }
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 200);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
 
         layout = QVBoxLayout(dialog)
 
@@ -1321,7 +1937,6 @@ class MainWindow(QMainWindow):
         return None
 
     def show_question_dialog(self, title, text, default_no=True):
-        """显示带中文按钮的是/否对话框，返回 True 表示用户点击了"是" """
         yes_btn = QPushButton("是")
         no_btn = QPushButton("否")
 
@@ -1338,8 +1953,6 @@ class MainWindow(QMainWindow):
 
     def disable_windivert_features(self):
         """禁用依赖于 WinDivert 的功能"""
-
-        # ==================== 禁用战局管理相关 ====================
         self.session_tab.solo_start_btn.setEnabled(False)
         self.session_tab.solo_stop_btn.setEnabled(False)
         self.session_tab.locked_start_btn.setEnabled(False)
@@ -1350,57 +1963,51 @@ class MainWindow(QMainWindow):
         self.session_tab.locked_start_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
         self.session_tab.locked_stop_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
 
-        self.session_tab.solo_start_btn.setStyleSheet("QPushButton { color: gray; }")
-        self.session_tab.solo_stop_btn.setStyleSheet("QPushButton { color: gray; }")
-        self.session_tab.locked_start_btn.setStyleSheet("QPushButton { color: gray; }")
-        self.session_tab.locked_stop_btn.setStyleSheet("QPushButton { color: gray; }")
+        self.session_tab.solo_start_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
+        self.session_tab.solo_stop_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
+        self.session_tab.locked_start_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
+        self.session_tab.locked_stop_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
 
         self.session_tab.solo_status_label.setText("❌ 不可用")
-        self.session_tab.solo_status_label.setStyleSheet("color: gray;")
+        self.session_tab.solo_status_label.setStyleSheet("color: rgba(128, 128, 128, 100);")
         self.session_tab.locked_status_label.setText("❌ 不可用")
-        self.session_tab.locked_status_label.setStyleSheet("color: gray;")
+        self.session_tab.locked_status_label.setStyleSheet("color: rgba(128, 128, 128, 100);")
 
         self.session_tab.log_text.append("⚠️ WinDivert 驱动不可用，战局管理功能已禁用")
 
-        # ==================== 禁用阻断连接相关 ====================
         self.temp_block_btn.setEnabled(False)
         self.temp_block_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
-        self.temp_block_btn.setStyleSheet("QPushButton { color: gray; }")
+        self.temp_block_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
 
         self.blacklist_enabled.setEnabled(False)
         self.blacklist_enabled.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
-        self.blacklist_enabled.setStyleSheet("QCheckBox { color: gray; }")
+        self.blacklist_enabled.setStyleSheet("QCheckBox { color: rgba(128, 128, 128, 100); }")
 
-        # 禁用"添加IP到黑名单"按钮
         if hasattr(self, 'add_bl_btn'):
             self.add_bl_btn.setEnabled(False)
             self.add_bl_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
-            self.add_bl_btn.setStyleSheet("QPushButton { color: gray; }")
+            self.add_bl_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
 
-        # 禁用"从黑名单移除"按钮
         if hasattr(self, 'remove_bl_btn'):
             self.remove_bl_btn.setEnabled(False)
             self.remove_bl_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
-            self.remove_bl_btn.setStyleSheet("QPushButton { color: gray; }")
+            self.remove_bl_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
 
-        # 在阻断列表显示提示
         self.block_table.setRowCount(1)
         self.block_table.setItem(0, 0, QTableWidgetItem("⚠ 驱动不可用"))
         self.block_table.setItem(0, 1, QTableWidgetItem("功能已禁用"))
         self.block_table.setItem(0, 2, QTableWidgetItem(""))
         self.block_table.item(0, 0).setForeground(QBrush(QColor(255, 100, 100)))
 
-        # ==================== 禁用加速器检测 ====================
         self.detect_btn.setEnabled(False)
         self.detect_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
-        self.detect_btn.setStyleSheet("QPushButton { color: gray; }")
+        self.detect_btn.setStyleSheet("QPushButton { color: rgba(128, 128, 128, 100); }")
 
         self.acc_output.setPlainText(
             "⚠️ WinDivert 驱动不可用\n\n加速器检测功能已禁用。\n\n请以管理员身份重新运行程序，\n或检查杀毒软件是否阻止了 WinDivert 驱动。")
 
-        # ==================== 状态栏提示 ====================
         self.driver_status_label = QLabel("⚠ WinDivert 驱动不可用，部分功能已禁用")
-        self.driver_status_label.setStyleSheet("color: #FF6B6B; font-weight: bold; padding: 2px 10px;")
+        self.driver_status_label.setStyleSheet("color: rgba(255, 107, 107, 200); font-weight: bold; padding: 2px 10px;")
         self.statusBar().addPermanentWidget(self.driver_status_label)
 
     def on_temp_block_ip(self):
@@ -1442,6 +2049,52 @@ class MainWindow(QMainWindow):
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        dialog.setStyleSheet("""
+            QDialog { background: rgba(20, 30, 50, 200); }
+            QLabel { color: rgba(212, 212, 212, 200); }
+            QComboBox {
+                background: rgba(40, 60, 80, 80);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 5px;
+            }
+            QComboBox:hover {
+                border-color: rgba(100, 150, 200, 60);
+            }
+            QComboBox QAbstractItemView {
+                background: rgba(30, 45, 65, 160);
+                color: rgba(212, 212, 212, 200);
+                selection-background-color: rgba(0, 120, 212, 100);
+            }
+            QCheckBox {
+                color: rgba(212, 212, 212, 200);
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:unchecked {
+                background: rgba(40, 60, 80, 60);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                background: rgba(0, 120, 212, 100);
+                border: 1px solid #0078d4;
+                border-radius: 3px;
+            }
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 200);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
 
         font = dialog.font()
         font.setPointSize(11)
@@ -1471,7 +2124,6 @@ class MainWindow(QMainWindow):
         remember_checkbox.setChecked(remember)
         layout.addWidget(remember_checkbox)
 
-        # 创建中文按钮
         ok_btn = QPushButton("确定")
         cancel_btn = QPushButton("取消")
 
@@ -1513,6 +2165,31 @@ class MainWindow(QMainWindow):
 
     def setup_ui(self):
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid rgba(100, 150, 200, 30);
+                background: rgba(20, 30, 50, 40);
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background: rgba(40, 60, 80, 40);
+                color: rgba(212, 212, 212, 180);
+                padding: 8px 15px;
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-bottom: none;
+                margin-right: 2px;
+                border-radius: 5px 5px 0 0;
+            }
+            QTabBar::tab:selected {
+                background: rgba(60, 90, 120, 80);
+                color: rgba(255, 255, 255, 220);
+                border-bottom: 2px solid #0078d4;
+            }
+            QTabBar::tab:hover {
+                background: rgba(80, 110, 140, 60);
+            }
+        """)
+
         self.monitor_tab = QWidget()
         self.acc_tab = QWidget()
         self.session_tab = SessionControlTab(self)
@@ -1521,23 +2198,92 @@ class MainWindow(QMainWindow):
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setFont(QFont("Consolas", 10))
+        self.console.setStyleSheet("""
+            QTextEdit {
+                background: rgba(20, 30, 50, 50);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 25);
+                border-radius: 6px;
+            }
+            QTextEdit:read-only {
+                background: rgba(15, 25, 45, 30);
+            }
+            QScrollBar:vertical {
+                background: rgba(30, 45, 65, 30);
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(80, 120, 170, 50);
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(100, 150, 200, 70);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
         layout.addWidget(self.console)
 
         btn_layout = QHBoxLayout()
         self.crash_btn = QPushButton("挂逼崩溃战局检测")
         self.crash_btn.setCheckable(True)
         self.crash_btn.toggled.connect(self.on_crash_detection_toggled)
+        self.crash_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+            QPushButton:checked {
+                background: rgba(70, 110, 160, 120);
+                border-color: #0078d4;
+            }
+        """)
+
         self.refresh_geo_btn = QPushButton("重试未知地理位置")
         self.refresh_geo_btn.clicked.connect(self.on_refresh_geo)
+        self.refresh_geo_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
+
         btn_layout.addWidget(self.crash_btn)
         btn_layout.addWidget(self.refresh_geo_btn)
 
         self.forget_ip_btn = QPushButton("忘记记住的IP")
         self.forget_ip_btn.clicked.connect(self.on_forget_ip)
+        self.forget_ip_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(180, 60, 60, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(200, 80, 80, 50);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(200, 80, 80, 120);
+            }
+        """)
         btn_layout.addWidget(self.forget_ip_btn)
 
         tip = QLabel("卡逼判定：平均速率>100KB/s 或 峰值>100KB/s")
-        tip.setStyleSheet("color: gray;")
+        tip.setStyleSheet("color: rgba(255, 200, 50, 220);")
         layout.addWidget(tip)
         self.tabs.addTab(self.monitor_tab, "战局IP检测")
 
@@ -1559,6 +2305,7 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel(
             f"监控IP: {LOCAL_IP} | 端口: {sorted(UDP_PORTS_TO_MONITOR)} | 临时阻断: 0 | 永久黑名单: {len(self.permanent_blacklist)}")
+        self.status_label.setStyleSheet("color: rgba(200, 200, 200, 200); padding: 2px 10px;")
         self.statusBar().addWidget(self.status_label)
 
     def create_right_panel(self):
@@ -1569,53 +2316,201 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(10)
 
         block_group = QGroupBox("阻断连接")
+        block_group.setStyleSheet("""
+            QGroupBox {
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: rgba(20, 30, 50, 30);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: rgba(255, 80, 80, 230);
+                font-weight: bold;
+            }
+        """)
         block_layout = QVBoxLayout(block_group)
+
         self.block_table = QTableWidget()
         self.block_table.setColumnCount(3)
         self.block_table.setHorizontalHeaderLabels(["IP地址", "状态", "操作"])
         self.block_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.block_table.setStyleSheet("""
+            QTableWidget {
+                background: rgba(20, 30, 50, 50);
+                color: rgba(212, 212, 212, 200);
+                gridline-color: rgba(100, 150, 200, 25);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 6px;
+            }
+            QTableWidget::item {
+                background: transparent;
+            }
+            QTableWidget::item:selected {
+                background: rgba(0, 120, 212, 80);
+                color: rgba(255, 255, 255, 220);
+            }
+            QHeaderView::section {
+                background: rgba(40, 60, 80, 50);
+                color: rgba(212, 212, 212, 180);
+                border: 1px solid rgba(100, 150, 200, 25);
+                padding: 4px;
+            }
+        """)
         block_layout.addWidget(self.block_table)
 
         temp_block_btn_layout = QHBoxLayout()
         self.temp_block_btn = QPushButton("添加IP临时阻断")
         self.temp_block_btn.clicked.connect(self.on_temp_block_ip)
+        self.temp_block_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
         temp_block_btn_layout.addWidget(self.temp_block_btn)
         block_layout.addLayout(temp_block_btn_layout)
         right_layout.addWidget(block_group)
 
         blacklist_group = QGroupBox("黑名单设置")
+        blacklist_group.setStyleSheet("""
+            QGroupBox {
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: rgba(20, 30, 50, 30);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: rgba(255, 80, 80, 230);
+                font-weight: bold;
+            }
+        """)
         blacklist_layout = QVBoxLayout(blacklist_group)
+
         self.blacklist_enabled = QCheckBox("启用黑名单")
         self.blacklist_enabled.setChecked(False)
         self.blacklist_enabled.toggled.connect(self.on_blacklist_toggled)
+        self.blacklist_enabled.setStyleSheet("color: rgba(212, 212, 212, 200);")
         blacklist_layout.addWidget(self.blacklist_enabled)
 
         self.blacklist_table = QTableWidget()
         self.blacklist_table.setColumnCount(2)
         self.blacklist_table.setHorizontalHeaderLabels(["IP地址", "操作"])
         self.blacklist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.blacklist_table.setStyleSheet("""
+            QTableWidget {
+                background: rgba(20, 30, 50, 50);
+                color: rgba(212, 212, 212, 200);
+                gridline-color: rgba(100, 150, 200, 25);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 6px;
+            }
+            QTableWidget::item {
+                background: transparent;
+            }
+            QTableWidget::item:selected {
+                background: rgba(0, 120, 212, 80);
+                color: rgba(255, 255, 255, 220);
+            }
+            QHeaderView::section {
+                background: rgba(40, 60, 80, 50);
+                color: rgba(212, 212, 212, 180);
+                border: 1px solid rgba(100, 150, 200, 25);
+                padding: 4px;
+            }
+        """)
         self.refresh_blacklist_table()
         blacklist_layout.addWidget(self.blacklist_table)
 
         bl_btn_layout = QHBoxLayout()
         self.add_bl_btn = QPushButton("添加IP到黑名单")
         self.add_bl_btn.clicked.connect(self.on_add_to_blacklist)
+        self.add_bl_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
+
         self.remove_bl_btn = QPushButton("从黑名单移除")
         self.remove_bl_btn.clicked.connect(self.on_remove_from_blacklist)
+        self.remove_bl_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
+
         bl_btn_layout.addWidget(self.add_bl_btn)
         bl_btn_layout.addWidget(self.remove_bl_btn)
         blacklist_layout.addLayout(bl_btn_layout)
         right_layout.addWidget(blacklist_group)
 
         forget_group = QGroupBox("IP设置")
+        forget_group.setStyleSheet("""
+            QGroupBox {
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: rgba(20, 30, 50, 30);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: rgba(170, 204, 238, 180);
+            }
+        """)
         forget_layout = QVBoxLayout(forget_group)
 
         self.forget_ip_setting_btn = QPushButton("忘记记住的IP地址")
         self.forget_ip_setting_btn.clicked.connect(self.on_forget_ip)
+        self.forget_ip_setting_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(180, 60, 60, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(200, 80, 80, 50);
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(200, 80, 80, 120);
+            }
+        """)
         forget_layout.addWidget(self.forget_ip_setting_btn)
 
         forget_tip = QLabel("点击后将清除已记住的IP地址，\n下次启动将重新选择")
-        forget_tip.setStyleSheet("color: gray; font-size: 9px;")
+        forget_tip.setStyleSheet("color: rgba(136, 170, 204, 160); font-size: 9px;")
         forget_layout.addWidget(forget_tip)
 
         right_layout.addWidget(forget_group)
@@ -1628,42 +2523,195 @@ class MainWindow(QMainWindow):
         tip_label = QLabel("注意：此检测功能仅适用于\"路由模式\"的加速器。\n"
                            "如果您使用进程模式加速，将无法检测。")
         tip_label.setWordWrap(True)
-        tip_label.setStyleSheet("color: orange; background-color: #FFF3CD; border: 1px solid #FFEEBA; padding: 5px;")
+        tip_label.setStyleSheet("color: rgba(255, 170, 68, 200); background-color: rgba(255, 243, 205, 20); "
+                                "border: 1px solid rgba(255, 238, 186, 30); padding: 5px; border-radius: 6px;")
         layout.addWidget(tip_label)
 
         info_group = QGroupBox("当前网络接口信息")
+        info_group.setStyleSheet("""
+            QGroupBox {
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: rgba(20, 30, 50, 30);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: rgba(170, 204, 238, 180);
+            }
+        """)
         info_layout = QVBoxLayout(info_group)
+
         self.nic_table = QTableWidget()
         self.nic_table.setColumnCount(3)
         self.nic_table.setHorizontalHeaderLabels(["接口名称", "IP地址", "类型"])
         self.nic_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.nic_table.setStyleSheet("""
+            QTableWidget {
+                background: rgba(20, 30, 50, 50);
+                color: rgba(212, 212, 212, 200);
+                gridline-color: rgba(100, 150, 200, 25);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 6px;
+            }
+            QTableWidget::item {
+                background: transparent;
+            }
+            QTableWidget::item:selected {
+                background: rgba(0, 120, 212, 80);
+                color: rgba(255, 255, 255, 220);
+            }
+            QHeaderView::section {
+                background: rgba(40, 60, 80, 50);
+                color: rgba(212, 212, 212, 180);
+                border: 1px solid rgba(100, 150, 200, 25);
+                padding: 4px;
+            }
+        """)
         info_layout.addWidget(self.nic_table)
+
         refresh_nic_btn = QPushButton("刷新网卡信息")
         refresh_nic_btn.clicked.connect(self.refresh_nic_table)
+        refresh_nic_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+        """)
         info_layout.addWidget(refresh_nic_btn)
         layout.addWidget(info_group)
 
         input_group = QGroupBox("IP地址配置")
+        input_group.setStyleSheet("""
+            QGroupBox {
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: rgba(20, 30, 50, 30);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: rgba(170, 204, 238, 180);
+            }
+        """)
         input_layout = QFormLayout(input_group)
         self.phy_ip_edit = QLineEdit()
         self.phy_ip_edit.setPlaceholderText("例如: 192.168.1.100")
+        self.phy_ip_edit.setStyleSheet("""
+            QLineEdit {
+                background: rgba(40, 60, 80, 80);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 5px;
+            }
+            QLineEdit:focus {
+                border-color: #0078d4;
+            }
+        """)
         self.virt_ip_edit = QLineEdit()
         self.virt_ip_edit.setPlaceholderText("例如: 172.20.10.1")
+        self.virt_ip_edit.setStyleSheet("""
+            QLineEdit {
+                background: rgba(40, 60, 80, 80);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 5px;
+            }
+            QLineEdit:focus {
+                border-color: #0078d4;
+            }
+        """)
         input_layout.addRow("物理网卡IP:", self.phy_ip_edit)
         input_layout.addRow("虚拟网卡IP:", self.virt_ip_edit)
         layout.addWidget(input_group)
 
         output_group = QGroupBox("检测输出")
+        output_group.setStyleSheet("""
+            QGroupBox {
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 30);
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: rgba(20, 30, 50, 30);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: rgba(170, 204, 238, 180);
+            }
+        """)
         output_layout = QVBoxLayout(output_group)
         self.acc_output = QTextEdit()
         self.acc_output.setReadOnly(True)
         self.acc_output.setFont(QFont("Consolas", 9))
+        self.acc_output.setStyleSheet("""
+            QTextEdit {
+                background: rgba(15, 25, 45, 40);
+                color: rgba(212, 212, 212, 200);
+                border: 1px solid rgba(100, 150, 200, 20);
+                border-radius: 6px;
+            }
+            QTextEdit:read-only {
+                background: rgba(15, 25, 45, 30);
+            }
+            QScrollBar:vertical {
+                background: rgba(30, 45, 65, 30);
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(80, 120, 170, 50);
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(100, 150, 200, 70);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
         output_layout.addWidget(self.acc_output)
         layout.addWidget(output_group)
 
         self.detect_btn = QPushButton("开始检测加速器")
         self.detect_btn.setMinimumHeight(40)
         self.detect_btn.clicked.connect(self.on_detect_accelerator)
+        self.detect_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(60, 90, 130, 100);
+                color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(100, 150, 200, 40);
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(80, 120, 170, 120);
+            }
+            QPushButton:disabled {
+                background: rgba(40, 50, 60, 60);
+                color: rgba(136, 136, 136, 100);
+            }
+        """)
         layout.addWidget(self.detect_btn)
 
     def refresh_nic_table(self):
@@ -1693,6 +2741,18 @@ class MainWindow(QMainWindow):
             self.blacklist_table.setItem(row, 0, QTableWidgetItem(ip))
             remove_btn = QPushButton("移除")
             remove_btn.clicked.connect(lambda checked, ip=ip: self.on_remove_from_blacklist_ip(ip))
+            remove_btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(180, 60, 60, 100);
+                    color: rgba(255, 255, 255, 220);
+                    border: 1px solid rgba(200, 80, 80, 50);
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                }
+                QPushButton:hover {
+                    background: rgba(200, 80, 80, 120);
+                }
+            """)
             self.blacklist_table.setCellWidget(row, 1, remove_btn)
 
     # ------------------- 槽函数 -------------------
@@ -1788,9 +2848,33 @@ class MainWindow(QMainWindow):
             if remaining == -1:
                 unblock_btn = QPushButton("解除永久")
                 unblock_btn.clicked.connect(lambda checked, ip=ip: self.on_unblock_permanent(ip))
+                unblock_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(180, 60, 60, 100);
+                        color: rgba(255, 255, 255, 220);
+                        border: 1px solid rgba(200, 80, 80, 50);
+                        border-radius: 4px;
+                        padding: 3px 8px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(200, 80, 80, 120);
+                    }
+                """)
             else:
                 unblock_btn = QPushButton("解除阻断")
                 unblock_btn.clicked.connect(lambda checked, ip=ip: self.on_unblock_temp(ip))
+                unblock_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(60, 130, 60, 100);
+                        color: rgba(255, 255, 255, 220);
+                        border: 1px solid rgba(80, 200, 80, 50);
+                        border-radius: 4px;
+                        padding: 3px 8px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(80, 200, 80, 120);
+                    }
+                """)
             self.block_table.setCellWidget(row, 2, unblock_btn)
 
         self.status_label.setText(
@@ -1995,250 +3079,169 @@ def get_system_theme():
         return "light"
 
 
-def apply_theme(app, theme):
-    """应用主题样式"""
+def apply_theme(app, theme, theme_colors=None):
+    """应用主题样式（固定白色文字）"""
     if theme == "dark":
+        # 使用固定的深色样式，文字固定为白色
         dark_style = """
         QWidget {
-            background-color: #1e1e1e;
-            color: #ffffff;
+            background-color: rgba(30, 40, 60, 160);
+            color: rgba(255, 255, 255, 220);
         }
         QMainWindow {
-            background-color: #1e1e1e;
+            background: transparent;
         }
         QTextEdit {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
-        }
-        QTextEdit:read-only {
-            background-color: #252526;
+            background-color: rgba(20, 30, 50, 180);
+            color: rgba(220, 220, 220, 220);
+            border: 1px solid rgba(100, 150, 200, 40);
+            border-radius: 6px;
         }
         QPushButton {
-            background-color: #3d3d3d;
-            color: #ffffff;
-            border: 1px solid #555555;
-            border-radius: 4px;
+            background-color: rgba(60, 90, 130, 180);
+            color: rgba(255, 255, 255, 235);
+            border: 1px solid rgba(100, 150, 200, 50);
+            border-radius: 6px;
             padding: 5px 10px;
         }
         QPushButton:hover {
-            background-color: #4d4d4d;
-            border-color: #666666;
-        }
-        QPushButton:pressed {
-            background-color: #2d2d2d;
+            background-color: rgba(80, 120, 170, 200);
+            color: rgba(255, 255, 255, 235);
         }
         QPushButton:disabled {
-            background-color: #2d2d2d;
-            color: #666666;
-        }
-        QPushButton:checked {
-            background-color: #4a4a4a;
-            border-color: #0078d4;
-        }
-        QPushButton:checked:hover {
-            background-color: #5a5a5a;
+            background-color: rgba(40, 50, 60, 120);
+            color: rgba(150, 150, 150, 120);
         }
         QTableWidget {
-            background-color: #252526;
-            color: #d4d4d4;
-            gridline-color: #3d3d3d;
-            border: 1px solid #3d3d3d;
+            background-color: rgba(20, 30, 50, 160);
+            color: rgba(220, 220, 220, 220);
+            gridline-color: rgba(100, 150, 200, 40);
+            border: 1px solid rgba(100, 150, 200, 40);
+            border-radius: 6px;
         }
         QTableWidget::item {
-            background-color: #252526;
+            background-color: rgba(20, 30, 50, 130);
+            color: rgba(220, 220, 220, 220);
         }
         QTableWidget::item:selected {
-            background-color: #0078d4;
-            color: #ffffff;
-        }
-        QHeaderView::section {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
-            padding: 4px;
+            background-color: rgba(0, 120, 212, 150);
+            color: rgba(255, 255, 255, 220);
         }
         QGroupBox {
-            color: #ffffff;
-            border: 1px solid #3d3d3d;
-            border-radius: 5px;
+            color: rgba(255, 255, 255, 220);
+            border: 1px solid rgba(100, 150, 200, 50);
+            border-radius: 8px;
             margin-top: 10px;
             padding-top: 10px;
+            background: rgba(20, 30, 50, 130);
         }
         QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px 0 5px;
+            color: rgba(200, 220, 240, 220);
         }
         QLabel {
-            color: #d4d4d4;
+            color: rgba(220, 220, 220, 220);
         }
         QCheckBox {
-            color: #d4d4d4;
-        }
-        QCheckBox::indicator {
-            width: 18px;
-            height: 18px;
-        }
-        QCheckBox::indicator:unchecked {
-            background-color: #3d3d3d;
-            border: 1px solid #555555;
-            border-radius: 3px;
-        }
-        QCheckBox::indicator:unchecked:hover {
-            background-color: #4d4d4d;
-        }
-        QCheckBox::indicator:checked {
-            background-color: #0078d4;
-            border: 1px solid #0078d4;
-            border-radius: 3px;
-        }
-        QCheckBox::indicator:checked:hover {
-            background-color: #1a8ad4;
+            color: rgba(220, 220, 220, 220);
         }
         QComboBox {
-            background-color: #3d3d3d;
-            color: #d4d4d4;
-            border: 1px solid #555555;
-            border-radius: 4px;
-            padding: 5px;
-        }
-        QComboBox:hover {
-            border-color: #666666;
-        }
-        QComboBox::drop-down {
-            border: none;
+            background-color: rgba(40, 60, 80, 160);
+            color: rgba(220, 220, 220, 220);
+            border: 1px solid rgba(100, 150, 200, 40);
+            border-radius: 6px;
         }
         QComboBox QAbstractItemView {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            selection-background-color: #0078d4;
-            selection-color: #ffffff;
+            background-color: rgba(30, 45, 65, 180);
+            color: rgba(220, 220, 220, 220);
+            selection-background-color: rgba(0, 120, 212, 150);
+            selection-color: rgba(255, 255, 255, 220);
         }
         QTabWidget::pane {
-            border: 1px solid #3d3d3d;
-            background-color: #1e1e1e;
+            border: 1px solid rgba(100, 150, 200, 40);
+            background-color: rgba(20, 30, 50, 180);
+            border-radius: 8px;
         }
         QTabBar::tab {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
+            background-color: rgba(40, 60, 80, 130);
+            color: rgba(200, 200, 200, 200);
             padding: 8px 15px;
-            border: 1px solid #3d3d3d;
+            border: 1px solid rgba(100, 150, 200, 30);
             border-bottom: none;
-            margin-right: 2px;
+            border-radius: 5px 5px 0 0;
         }
         QTabBar::tab:selected {
-            background-color: #3d3d3d;
-            color: #ffffff;
+            background-color: rgba(60, 90, 120, 180);
+            color: rgba(255, 255, 255, 230);
             border-bottom: 2px solid #0078d4;
         }
-        QTabBar::tab:hover {
-            background-color: #4d4d4d;
-        }
         QLineEdit {
-            background-color: #3d3d3d;
-            color: #d4d4d4;
-            border: 1px solid #555555;
-            border-radius: 4px;
-            padding: 5px;
-        }
-        QLineEdit:focus {
-            border-color: #0078d4;
-        }
-        QScrollBar:vertical {
-            background-color: #2d2d2d;
-            width: 12px;
+            background-color: rgba(40, 60, 80, 160);
+            color: rgba(220, 220, 220, 220);
+            border: 1px solid rgba(100, 150, 200, 40);
             border-radius: 6px;
-        }
-        QScrollBar::handle:vertical {
-            background-color: #555555;
-            min-height: 20px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background-color: #666666;
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            height: 0;
-        }
-        QScrollBar:horizontal {
-            background-color: #2d2d2d;
-            height: 12px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:horizontal {
-            background-color: #555555;
-            min-width: 20px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:horizontal:hover {
-            background-color: #666666;
-        }
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-            width: 0;
         }
         QMenuBar {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
+            background-color: rgba(30, 45, 65, 130);
+            color: rgba(220, 220, 220, 220);
         }
         QMenuBar::item:selected {
-            background-color: #3d3d3d;
+            background-color: rgba(60, 90, 120, 160);
+            color: rgba(255, 255, 255, 220);
         }
         QMenu {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
+            background-color: rgba(30, 45, 65, 180);
+            color: rgba(220, 220, 220, 220);
+            border: 1px solid rgba(100, 150, 200, 30);
         }
         QMenu::item:selected {
-            background-color: #0078d4;
-            color: #ffffff;
+            background-color: rgba(0, 120, 212, 150);
+            color: rgba(255, 255, 255, 220);
         }
         QStatusBar {
-            background-color: #1e1e1e;
-            color: #d4d4d4;
-        }
-        QToolTip {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
+            background-color: rgba(15, 25, 45, 130);
+            color: rgba(200, 200, 200, 200);
         }
         QDialog {
-            background-color: #1e1e1e;
+            background-color: rgba(20, 30, 50, 230);
+            color: rgba(220, 220, 220, 220);
         }
         QMessageBox {
-            background-color: #1e1e1e;
+            background-color: rgba(20, 30, 50, 230);
+            color: rgba(220, 220, 220, 220);
         }
         """
         app.setStyleSheet(dark_style)
-        print("[主题] 应用深色主题")
+        print("[主题] 应用深色主题（固定白色文字）")
     else:
         # 浅色主题
         light_style = """
         QTextEdit:read-only {
-            background-color: #f8f8f8;
+            background-color: rgba(248, 248, 248, 200);
+            color: rgba(50, 50, 50, 200);
         }
         QTableWidget::item:selected {
-            background-color: #0078d4;
-            color: #ffffff;
+            background-color: rgba(0, 120, 212, 150);
+            color: rgba(255, 255, 255, 220);
         }
         QGroupBox {
-            border: 1px solid #d0d0d0;
+            border: 1px solid rgba(208, 208, 208, 180);
             border-radius: 5px;
             margin-top: 10px;
             padding-top: 10px;
+            background: rgba(255, 255, 255, 160);
+            color: rgba(50, 50, 50, 220);
         }
         QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px 0 5px;
+            color: rgba(50, 50, 50, 220);
+        }
+        QLabel {
+            color: rgba(50, 50, 50, 200);
         }
         """
         app.setStyleSheet(light_style)
-        print("[主题] 应用浅色主题")
-
+        print("[主题] 应用浅色主题（固定文字）")
 
 def main():
-    # 设置 DLL 搜索路径
     set_dll_search_path()
 
     if sys.platform == "win32":
@@ -2254,10 +3257,8 @@ def main():
 
     app = QApplication(sys.argv)
 
-    # ====================== 应用系统主题 ======================
     theme = get_system_theme()
     apply_theme(app, theme)
-    # =======================================================
 
     icon_path = get_icon_path()
     if os.path.exists(icon_path):
