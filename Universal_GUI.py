@@ -30,7 +30,7 @@ from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 def get_base_path():
     """获取程序所在目录（兼容开发环境和打包后的exe）"""
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe，直接返回 exe 所在目录
+        # 打包后的 exe，返回 exe 所在目录
         return os.path.dirname(sys.executable)
     else:
         # 开发环境，返回脚本所在目录
@@ -38,10 +38,24 @@ def get_base_path():
 
 
 def get_icon_path():
+    """获取图标文件路径（兼容开发环境和打包后的exe）"""
     icon_filename = "ico.ico"
-    base = get_base_path()
-    icon_path = os.path.join(base, icon_filename)
-    return icon_path
+
+    if getattr(sys, 'frozen', False):
+        # 打包后的 exe，图标在 exe 同级目录
+        exe_dir = os.path.dirname(sys.executable)
+        icon_path = os.path.join(exe_dir, icon_filename)
+        if os.path.exists(icon_path):
+            return icon_path
+        # 如果 exe 同级没有，尝试临时目录（兼容旧版）
+        if hasattr(sys, '_MEIPASS'):
+            icon_path = os.path.join(sys._MEIPASS, icon_filename)
+            if os.path.exists(icon_path):
+                return icon_path
+        return icon_path
+    else:
+        # 开发环境，图标在脚本同级目录
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_filename)
 
 
 # ====================== DLL 搜索路径设置 ======================
