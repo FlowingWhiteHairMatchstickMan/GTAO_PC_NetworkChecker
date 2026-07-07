@@ -30,10 +30,10 @@ from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 def get_base_path():
     """获取程序所在目录（兼容开发环境和打包后的exe）"""
     if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            return sys._MEIPASS
+        # 打包后的 exe，直接返回 exe 所在目录
         return os.path.dirname(sys.executable)
     else:
+        # 开发环境，返回脚本所在目录
         return os.path.dirname(os.path.abspath(__file__))
 
 
