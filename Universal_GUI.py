@@ -1478,7 +1478,6 @@ class MainWindow(QMainWindow):
         tip_label.setFont(font)
         tip_label.setStyleSheet("padding: 5px;")
         layout.addWidget(tip_label)
-
         # ============ IP选择下拉框 ============
         label = QLabel("可用IP地址：")
         label.setFont(font)
