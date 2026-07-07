@@ -41,11 +41,6 @@ def get_icon_path():
     icon_filename = "ico.ico"
     base = get_base_path()
     icon_path = os.path.join(base, icon_filename)
-    if not os.path.exists(icon_path) and getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        alt_path = os.path.join(exe_dir, icon_filename)
-        if os.path.exists(alt_path):
-            return alt_path
     return icon_path
 
 
