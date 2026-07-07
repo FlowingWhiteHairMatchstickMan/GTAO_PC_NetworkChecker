@@ -1304,8 +1304,6 @@ class MainWindow(QMainWindow):
         return msg_box.clickedButton() == yes_btn
 
     def disable_windivert_features(self):
-        """禁用依赖于 WinDivert 的功能"""
-
         # ==================== 禁用战局管理相关 ====================
         self.session_tab.solo_start_btn.setEnabled(False)
         self.session_tab.solo_stop_btn.setEnabled(False)
