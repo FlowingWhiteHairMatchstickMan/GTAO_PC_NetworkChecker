@@ -12,6 +12,7 @@ import pydivert
 import queue
 import subprocess
 import warnings
+import shutil
 from collections import deque, defaultdict
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -25,120 +26,106 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QSettings
 from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 
+def ensure_persistent_cache():
+    if not getattr(sys, 'frozen', False):
+        return
 
+    exe_dir = os.path.dirname(sys.executable)
+    cache_dir = os.path.join(exe_dir, "SessionManagerRuntime")
+    if os.path.exists(cache_dir):
+        needed = ["WinDivert.dll", "windivertctl.exe", "WinDivert64.sys"]
+        if all(os.path.exists(os.path.join(cache_dir, f)) for f in needed):
+            return
+
+    if hasattr(sys, '_MEIPASS'):
+        temp_dir = sys._MEIPASS
+        os.makedirs(cache_dir, exist_ok=True)
+        for f in ["WinDivert.dll", "windivertctl.exe", "WinDivert64.sys"]:
+            src = os.path.join(temp_dir, f)
+            dst = os.path.join(cache_dir, f)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+        print(f"[缓存] 已创建持久缓存: {cache_dir}")
 # ====================== 路径辅助函数 ======================
 def get_base_path():
-    """获取程序所在目录（兼容开发环境和打包后的exe）"""
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe，返回 exe 所在目录
         return os.path.dirname(sys.executable)
     else:
-        # 开发环境，返回脚本所在目录
         return os.path.dirname(os.path.abspath(__file__))
 
 
 def get_icon_path():
-    """获取图标文件路径（兼容开发环境和打包后的exe）"""
     icon_filename = "ico.ico"
 
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe，图标在 exe 同级目录
         exe_dir = os.path.dirname(sys.executable)
         icon_path = os.path.join(exe_dir, icon_filename)
         if os.path.exists(icon_path):
             return icon_path
-        # 如果 exe 同级没有，尝试临时目录（兼容旧版）
         if hasattr(sys, '_MEIPASS'):
             icon_path = os.path.join(sys._MEIPASS, icon_filename)
             if os.path.exists(icon_path):
                 return icon_path
         return icon_path
     else:
-        # 开发环境，图标在脚本同级目录
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_filename)
 
 
 # ====================== DLL 搜索路径设置 ======================
 def set_dll_search_path():
+    import ctypes
     if sys.platform != "win32":
         return
     base_dir = get_base_path()
-    try:
-        path_env = os.environ.get('PATH', '')
-        if base_dir not in path_env.split(os.pathsep):
-            os.environ['PATH'] = base_dir + os.pathsep + path_env
-            print(f"[DLL] 已添加到 PATH: {base_dir}")
-        if hasattr(os, 'add_dll_directory'):
-            os.add_dll_directory(base_dir)
-            print(f"[DLL] 已添加搜索路径: {base_dir}")
-        else:
-            import ctypes
-            ctypes.windll.kernel32.SetDllDirectoryW(base_dir)
-            print(f"[DLL] 已设置 DllDirectory: {base_dir}")
-        dll_path = os.path.join(base_dir, 'WinDivert.dll')
-        if os.path.exists(dll_path):
-            try:
+    cache_dir = os.path.join(base_dir, "SessionManagerRuntime")
+    for d in [base_dir, cache_dir]:
+        if os.path.exists(d):
+            path_env = os.environ.get('PATH', '')
+            if d not in path_env.split(os.pathsep):
+                os.environ['PATH'] = d + os.pathsep + path_env
+            if hasattr(os, 'add_dll_directory'):
+                os.add_dll_directory(d)
+            else:
                 import ctypes
-                ctypes.CDLL(dll_path)
-                print(f"[DLL] 已提前加载: {dll_path}")
-            except Exception as e:
-                print(f"[DLL] 提前加载失败: {e}")
-    except Exception as e:
-        print(f"[DLL] 设置搜索路径失败: {e}")
+                ctypes.windll.kernel32.SetDllDirectoryW(d)
+            dll_path = os.path.join(d, 'WinDivert.dll')
+            if os.path.exists(dll_path):
+                try:
+                    ctypes.CDLL(dll_path)
+                    print(f"[DLL] 已从 {d} 加载")
+                except:
+                    pass
 
 
 # ====================== WinDivert 驱动安装 ======================
 def ensure_windivert_driver():
     if sys.platform != "win32":
         return True
-    try:
-        w = pydivert.WinDivert("false")
-        w.open()
-        w.close()
+    if check_driver_available():
         print("[驱动] 驱动已就绪")
         return True
-    except Exception as e:
-        print(f"[驱动] 驱动未就绪: {e}")
     try:
         if not pydivert.WinDivert.is_registered():
-            print("[驱动] 尝试通过 pydivert 注册驱动...")
             pydivert.WinDivert.register()
-        w = pydivert.WinDivert("false")
-        w.open()
-        w.close()
-        print("[驱动] pydivert 注册成功")
-        return True
-    except Exception as e:
-        print(f"[驱动] pydivert 注册失败: {e}")
+        if check_driver_available():
+            return True
+    except:
+        pass
+
     try:
         base = get_base_path()
         ctl_path = os.path.join(base, "windivertctl.exe")
         if not os.path.exists(ctl_path):
             print("[驱动] windivertctl.exe 未找到")
             return False
-
-        print("[驱动] 使用 windivertctl.exe 安装驱动...")
-        subprocess.run([ctl_path, "uninstall"], capture_output=True, shell=True, timeout=5)
+        subprocess.run([ctl_path, "uninstall"], capture_output=True, timeout=5)
         time.sleep(0.5)
-        result = subprocess.run([ctl_path, "install"], capture_output=True, text=True, shell=True, timeout=10)
-        if result.returncode != 0:
-            print(f"[驱动] windivertctl 安装失败: {result.stderr}")
-            return False
-        subprocess.run(["sc", "start", "windivert"], capture_output=True, shell=True, timeout=5)
+        subprocess.run([ctl_path, "install"], capture_output=True, timeout=10)
+        subprocess.run(["sc", "start", "windivert"], capture_output=True, timeout=5)
         time.sleep(2)
-        w = pydivert.WinDivert("false")
-        w.open()
-        w.close()
-        print("[驱动] 手动安装成功，驱动已就绪")
-        return True
-    except subprocess.TimeoutExpired:
-        print("[驱动] 驱动安装超时")
+        return check_driver_available()
+    except:
         return False
-    except Exception as e:
-        print(f"[驱动] 手动安装失败: {e}")
-
-    return False
-
 
 def check_driver_available():
     try:
@@ -391,24 +378,17 @@ LOCAL_IP = ""
 
 def sniffer():
     global raw_bytes_map, gta_ports, running
-
-    # 获取用户选择的IP
     if ":" in LOCAL_IP:
         local_ip, _ = LOCAL_IP.split(":")
     else:
         local_ip = LOCAL_IP
-
-    # 收集所有本地IP（用于方向判断）
     local_ips = set()
     for name, addrs in psutil.net_if_addrs().items():
         for addr in addrs:
             if addr.family == socket.AF_INET and not addr.address.startswith("127."):
                 local_ips.add(addr.address)
-
-    # 确保用户IP在本地IP列表中
     if local_ip and local_ip not in local_ips:
         local_ips.add(local_ip)
-
     print(f"[嗅探器] 绑定到 IP: {local_ip}")
     print(f"[嗅探器] 本地IP列表: {list(local_ips)}")
 
@@ -500,7 +480,7 @@ def port_scanner():
         time.sleep(5)
 
 
-# ====================== 过滤器函数（模块级，避免多进程重复启动GUI） ======================
+# ====================== 过滤器函数 ======================
 def run_solo_filter():
     set_dll_search_path()
     try:
@@ -644,7 +624,7 @@ def blocker_process_func(local_ip, cmd_queue):
     print("[阻断进程] 退出")
 
 
-# ====================== 按需阻断管理器（优化版） ======================
+# ====================== 按需阻断管理器 ======================
 class OnDemandBlocker:
     def __init__(self):
         self.blocked_ips = set()
@@ -846,7 +826,7 @@ class OnDemandBlocker:
             self.temp_blocked.clear()
 
 
-# ====================== 进程监控线程（挂逼崩溃检测） ======================
+# ====================== 进程监控线程 ======================
 class ProcessMonitorThread(QThread):
     process_exited = pyqtSignal(list)
 
@@ -940,7 +920,7 @@ class AcceleratorTestThread(QThread):
 
             while self.running and (time.time() - start_time) < 10:
                 try:
-                    packet = w.recv(timeout=100)
+                    packet = w.recv(100)
                     if packet is None:
                         timeout_count += 1
                         if timeout_count % 10 == 0:
@@ -1091,6 +1071,12 @@ class SessionManager:
             self.locked_process.terminate()
             self.locked_process.join(0.5)
         return True, "战局锁已停止"
+    def stop_all(self):
+        """停止所有正在运行的战局管理进程"""
+        if self.solo_running:
+            self.stop_solo_session()
+        if self.locked_running:
+            self.stop_locked_session()
 
 
 # ====================== 战局管理选项卡 ======================
@@ -1191,15 +1177,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
 
-        # 设置窗口默认启动大小
         self.resize(1100, 650)
 
-        # 设置窗口图标
-        icon_path = get_icon_path()
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-
-        # 检查驱动状态
         self.driver_available = check_driver_available()
         if not self.driver_available:
             print("[主程序] 驱动不可用，尝试安装...")
@@ -1345,7 +1324,6 @@ class MainWindow(QMainWindow):
         self.blacklist_enabled.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
         self.blacklist_enabled.setStyleSheet("QCheckBox { color: gray; }")
 
-        # 禁用"添加IP到黑名单"按钮
         if hasattr(self, 'add_bl_btn'):
             self.add_bl_btn.setEnabled(False)
             self.add_bl_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
@@ -1374,6 +1352,42 @@ class MainWindow(QMainWindow):
         self.driver_status_label = QLabel("⚠ WinDivert 驱动不可用，部分功能已禁用")
         self.driver_status_label.setStyleSheet("color: #FF6B6B; font-weight: bold; padding: 2px 10px;")
         self.statusBar().addPermanentWidget(self.driver_status_label)
+
+    def on_fix_windivert(self):
+        reply = QMessageBox.question(
+            self,
+            "确认修复",
+            "此操作将删除 WinDivert 驱动并重启程序。\n"
+            "重启后驱动会自动重新安装。\n\n"
+            "确定继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            result = subprocess.run(
+                ["sc", "delete", "WinDivert"],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            if result.returncode == 0:
+                QMessageBox.information(self, "成功", "WinDivert 驱动已删除，程序即将重启...")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "警告",
+                    f"删除驱动失败（可能驱动未安装）：{result.stderr}\n程序仍将重启尝试修复。"
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "错误",
+                f"执行命令出错：{e}\n程序仍将重启尝试修复。"
+            )
+        self.cleanup_resources()
+        self.restart_program()
 
     def on_temp_block_ip(self):
         if not self.driver_available:
@@ -1474,7 +1488,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.setSpacing(10)
 
-        # ============ 提示文字（纯文本，无框） ============
+        # ============ 提示文字 ============
         tip_label = QLabel(
             "请选择你要监控的IP地址\n\n"
             "路由模式加速 → 请选择加速器的虚拟网卡IP\n"
@@ -1567,6 +1581,12 @@ class MainWindow(QMainWindow):
                         self.permanent_blacklist.add(ip)
         except FileNotFoundError:
             pass
+
+    def restart_program(self):
+        QTimer.singleShot(500, self._really_restart)
+
+    def _really_restart(self):
+        os.execl(sys.executable, sys.executable, *sys.argv)
 
     def setup_ui(self):
         self.tabs = QTabWidget()
@@ -1664,16 +1684,30 @@ class MainWindow(QMainWindow):
         blacklist_layout.addLayout(bl_btn_layout)
         right_layout.addWidget(blacklist_group)
 
-        forget_group = QGroupBox("IP设置")
+        forget_group = QGroupBox("软件设置")
         forget_layout = QVBoxLayout(forget_group)
 
         self.forget_ip_setting_btn = QPushButton("忘记记住的IP地址")
         self.forget_ip_setting_btn.clicked.connect(self.on_forget_ip)
         forget_layout.addWidget(self.forget_ip_setting_btn)
 
-        forget_tip = QLabel("点击后将清除已记住的IP地址，\n下次启动将重新选择")
+        forget_tip = QLabel("点击后将清除已记住的IP地址，下次启动将重新选择")
         forget_tip.setStyleSheet("color: gray; font-size: 9px;")
         forget_layout.addWidget(forget_tip)
+
+        self.fix_windivert_btn = QPushButton("尝试修复WinDivert驱动")
+        self.fix_windivert_btn.clicked.connect(self.on_fix_windivert)
+        if self.driver_available:
+            self.fix_windivert_btn.setEnabled(False)
+            self.fix_windivert_btn.setToolTip("驱动已正常，无需修复")
+        else:
+            self.fix_windivert_btn.setEnabled(True)
+            self.fix_windivert_btn.setToolTip("点击删除损坏的驱动并重启程序以重新安装")
+        forget_layout.addWidget(self.fix_windivert_btn)
+
+        fix_tip = QLabel("重置当前WinDivert驱动，按下确定后将会进行清理并自动重启程序")
+        fix_tip.setStyleSheet("color: gray; font-size: 9px;")
+        forget_layout.addWidget(fix_tip)
 
         right_layout.addWidget(forget_group)
 
@@ -1752,7 +1786,6 @@ class MainWindow(QMainWindow):
             remove_btn.clicked.connect(lambda checked, ip=ip: self.on_remove_from_blacklist_ip(ip))
             self.blacklist_table.setCellWidget(row, 1, remove_btn)
 
-    # ------------------- 槽函数 -------------------
     def on_forget_ip(self):
         if self.show_question_dialog("确认忘记IP", "确定要忘记已记住的IP地址吗？\n\n下次启动程序时将会重新选择IP。"):
             config_file = os.path.join(get_base_path(), "config.ini")
@@ -2003,6 +2036,27 @@ class MainWindow(QMainWindow):
 
         self.console.setText("\n".join(lines))
 
+
+    def cleanup_resources(self):
+        global running
+        running = False
+
+        self.proc_monitor.stop()
+        self.proc_monitor.wait()
+
+        self.session_tab.session_manager.stop_all()
+
+        if hasattr(self, 'acc_test_thread') and self.acc_test_thread.isRunning():
+            self.acc_test_thread.stop()
+            self.acc_test_thread.wait(2)
+
+        self.blocker.stop()
+        if self.blocker.process and self.blocker.process.is_alive():
+            self.blocker.process.join(2.0)
+            if self.blocker.process.is_alive():
+                self.blocker.process.terminate()
+                self.blocker.process.join(1.0)
+
     def on_detect_accelerator(self):
         if not self.driver_available:
             QMessageBox.warning(self, "功能不可用",
@@ -2037,10 +2091,7 @@ class MainWindow(QMainWindow):
         self.detect_btn.setText("开始检测加速器")
 
     def closeEvent(self, event):
-        global running
-        running = False
-        self.proc_monitor.stop()
-        self.blocker.stop()
+        self.cleanup_resources()
         event.accept()
 
 
@@ -2302,12 +2353,24 @@ def apply_theme(app, theme):
         """
         app.setStyleSheet(light_style)
         print("[主题] 应用浅色主题")
-
+def clean_temp_dir():
+    """启动时清理上次残留的 SessionManagerTEMP 目录"""
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+        cache_dir = os.path.join(base_dir, "SessionManagerTEMP")
+        if os.path.exists(cache_dir):
+            try:
+                shutil.rmtree(cache_dir)
+                print(f"[清理] 已删除残留缓存: {cache_dir}")
+            except Exception as e:
+                print(f"[清理] 删除残留缓存失败（可能正在被占用）: {e}")
 
 def main():
-    # 设置 DLL 搜索路径
+    import ctypes
+    clean_temp_dir()
+    ensure_persistent_cache()
     set_dll_search_path()
-
+    app = QApplication(sys.argv)
     if sys.platform == "win32":
         import ctypes
         try:
@@ -2319,17 +2382,17 @@ def main():
         except:
             pass
 
-    app = QApplication(sys.argv)
-
-    # ====================== 应用系统主题 ======================
     theme = get_system_theme()
     apply_theme(app, theme)
-    # =======================================================
 
     icon_path = get_icon_path()
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
-
+    else:
+        if hasattr(sys, '_MEIPASS'):
+            fallback = os.path.join(sys._MEIPASS, "ico.ico")
+            if os.path.exists(fallback):
+                app.setWindowIcon(QIcon(fallback))
     if sys.platform == "win32":
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GTA5_RDR2_Network_Monitor")
