@@ -30,10 +30,8 @@ from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 def get_base_path():
     """获取程序所在目录（兼容开发环境和打包后的exe）"""
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe，返回 exe 所在目录
         return os.path.dirname(sys.executable)
     else:
-        # 开发环境，返回脚本所在目录
         return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -42,19 +40,16 @@ def get_icon_path():
     icon_filename = "ico.ico"
 
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe，图标在 exe 同级目录
         exe_dir = os.path.dirname(sys.executable)
         icon_path = os.path.join(exe_dir, icon_filename)
         if os.path.exists(icon_path):
             return icon_path
-        # 如果 exe 同级没有，尝试临时目录（兼容旧版）
         if hasattr(sys, '_MEIPASS'):
             icon_path = os.path.join(sys._MEIPASS, icon_filename)
             if os.path.exists(icon_path):
                 return icon_path
         return icon_path
     else:
-        # 开发环境，图标在脚本同级目录
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_filename)
 
 
@@ -392,20 +387,17 @@ LOCAL_IP = ""
 def sniffer():
     global raw_bytes_map, gta_ports, running
 
-    # 获取用户选择的IP
     if ":" in LOCAL_IP:
         local_ip, _ = LOCAL_IP.split(":")
     else:
         local_ip = LOCAL_IP
 
-    # 收集所有本地IP（用于方向判断）
     local_ips = set()
     for name, addrs in psutil.net_if_addrs().items():
         for addr in addrs:
             if addr.family == socket.AF_INET and not addr.address.startswith("127."):
                 local_ips.add(addr.address)
 
-    # 确保用户IP在本地IP列表中
     if local_ip and local_ip not in local_ips:
         local_ips.add(local_ip)
 
@@ -1191,15 +1183,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
 
-        # 设置窗口默认启动大小
         self.resize(1100, 650)
 
-        # 设置窗口图标
         icon_path = get_icon_path()
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # 检查驱动状态
         self.driver_available = check_driver_available()
         if not self.driver_available:
             print("[主程序] 驱动不可用，尝试安装...")
@@ -1345,7 +1334,6 @@ class MainWindow(QMainWindow):
         self.blacklist_enabled.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
         self.blacklist_enabled.setStyleSheet("QCheckBox { color: gray; }")
 
-        # 禁用"添加IP到黑名单"按钮
         if hasattr(self, 'add_bl_btn'):
             self.add_bl_btn.setEnabled(False)
             self.add_bl_btn.setToolTip("❌ WinDivert 驱动不可用，此功能已禁用")
@@ -1474,7 +1462,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.setSpacing(10)
 
-        # ============ 提示文字（纯文本，无框） ============
+        # ============ 提示文字 ============
         tip_label = QLabel(
             "请选择你要监控的IP地址\n\n"
             "路由模式加速 → 请选择加速器的虚拟网卡IP\n"
@@ -1752,7 +1740,6 @@ class MainWindow(QMainWindow):
             remove_btn.clicked.connect(lambda checked, ip=ip: self.on_remove_from_blacklist_ip(ip))
             self.blacklist_table.setCellWidget(row, 1, remove_btn)
 
-    # ------------------- 槽函数 -------------------
     def on_forget_ip(self):
         if self.show_question_dialog("确认忘记IP", "确定要忘记已记住的IP地址吗？\n\n下次启动程序时将会重新选择IP。"):
             config_file = os.path.join(get_base_path(), "config.ini")
@@ -2305,7 +2292,6 @@ def apply_theme(app, theme):
 
 
 def main():
-    # 设置 DLL 搜索路径
     set_dll_search_path()
 
     if sys.platform == "win32":
@@ -2320,12 +2306,8 @@ def main():
             pass
 
     app = QApplication(sys.argv)
-
-    # ====================== 应用系统主题 ======================
     theme = get_system_theme()
     apply_theme(app, theme)
-    # =======================================================
-
     icon_path = get_icon_path()
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
