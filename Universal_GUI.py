@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QSettings
 from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 
-# ====================== ip2region 导入（新增） ======================
+# ====================== ip2region 导入 ======================
 try:
     import ip2region.util as util
     import ip2region.searcher as xdb
@@ -64,12 +64,10 @@ def get_base_path():
         return os.path.dirname(os.path.abspath(__file__))
 
 def get_resource_path(relative_path):
-    """获取资源文件的绝对路径，兼容开发环境和 PyInstaller onefile 打包"""
+    """获取资源文件的绝对路径，兼容开发环境和 PyInstaller 打包"""
     if getattr(sys, 'frozen', False):
-        # 打包后，资源文件位于 _MEIPASS 临时目录
         base_path = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     else:
-        # 开发环境，资源文件在脚本所在目录
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
@@ -267,31 +265,21 @@ def reverse_dns_lookup(ip):
 
 
 def get_rockstar_server_type(ip, domain, asn_info=None):
-    # 1. 硬编码 IP 列表
     if ip in TRADE_SERVER_IPS:
         return "官方-交易服务器"
     elif ip in CLOUD_SAVE_SERVER_IPS:
         return "官方-云存档服务器"
-
-    # 2. 域名匹配（支持通配）
     if domain:
         domain_lower = domain.lower()
-        # 精确列表匹配
         for rd in ROCKSTAR_DOMAINS:
             if rd in domain_lower:
                 return "官方-CDN服务器与云服务器"
-        # 泛域名匹配（新增）
         if "rockstargames.com" in domain_lower or "take-two" in domain_lower:
             return "官方-其他服务器"
-
-    # 3. IP 范围匹配
     if any(ip.startswith(r) for r in ROCKSTAR_IP_RANGES):
         return "官方-中转服务器"
-
-    # 4. ASN 信息匹配（来自 API 或 ip2region 的 ISP）
     if asn_info and ("take-two" in asn_info.lower() or "take two" in asn_info.lower()):
         return "官方-其他服务器"
-
     return None
 
 
@@ -328,7 +316,7 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
     return truncate_mixed_string(isp_data, 25) if isp_data else "未知"
 
 
-# ====================== 核心修改：get_geo_info ======================
+# ====================== 地理地区检测 ======================
 def decode_ip2region_bytes(data):
     """尝试多种编码解码 ip2region 返回的字节数据"""
     encodings = ['gb18030', 'gbk', 'gb2312', 'big5', 'utf-8', 'latin-1']
@@ -337,25 +325,17 @@ def decode_ip2region_bytes(data):
             return data.decode(enc)
         except UnicodeDecodeError:
             continue
-    # 所有编码均失败，使用 replace 避免崩溃
     return data.decode('utf-8', errors='replace')
-
-
 def get_geo_info(ip):
-    # 先检查缓存
     if ip in geo_cache:
         return geo_cache[ip]
-
     if not is_public_ip(ip):
         info = ("区域网", "-", False, None)
         geo_cache[ip] = info
         return info
-
-    # ---------- 初始化变量 ----------
     ip2_location = None
     ip2_is_chinese = False
     ip2_isp = None
-
     # ---------- 1. 尝试 ip2region 获取地区 ----------
     if ip2region_searcher is not None:
         try:
@@ -384,13 +364,9 @@ def get_geo_info(ip):
                 province = clean(province)
                 city = clean(city)
                 isp = clean(isp)
-
-                # 判断是否为大陆（裸连）
                 non_mainland_keywords = ["香港", "澳门", "台湾", "Hong Kong", "Macau", "Taiwan"]
                 is_hk_mo_tw = any(kw in (area + province + city) or kw in country for kw in non_mainland_keywords)
                 ip2_is_chinese = (country in ("中国", "China")) and not is_hk_mo_tw
-
-                # 构建地区
                 if country in ("中国", "China"):
                     if province and city:
                         if city.startswith(province) or province.startswith(city):
@@ -412,14 +388,12 @@ def get_geo_info(ip):
                     if city and city not in (country, province):
                         loc_parts.append(city)
                     location = " ".join(loc_parts[:2]) if loc_parts else "未知"
-
                 if location:
                     ip2_location = location
                 if isp:
                     ip2_isp = isp
         except Exception as e:
             print(f"[ip2region] 查询 {ip} 失败: {e}")
-
     # ---------- 2. 调用公开 API 获取完整信息 ----------
     api_success = False
     api_country = api_region = api_city = api_isp = api_org = api_as = api_domain = ""
@@ -440,7 +414,6 @@ def get_geo_info(ip):
                 api_domain = reverse_dns_lookup(ip)
     except Exception:
         pass
-
     # ---------- 3. 组合最终结果 ----------
     if ip2_is_chinese:
         location = ip2_location if ip2_location else "未知"
@@ -463,7 +436,6 @@ def get_geo_info(ip):
         else:
             location = ip2_location if ip2_location else "未知"
         is_chinese = False
-
     # ---------- 4. ISP 与服务器类型 ----------
     if api_success:
         friendly_isp = get_friendly_isp_name(api_isp, api_org, api_as)
