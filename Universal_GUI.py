@@ -26,6 +26,16 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QSettings
 from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 
+# ====================== ip2region 导入（新增） ======================
+try:
+    import ip2region.util as util
+    import ip2region.searcher as xdb
+except ImportError:
+    util = None
+    xdb = None
+    print("[警告] py-ip2region 库未安装，将仅使用在线API (pip install py-ip2region)")
+
+
 def ensure_persistent_cache():
     if not getattr(sys, 'frozen', False):
         return
@@ -53,6 +63,15 @@ def get_base_path():
     else:
         return os.path.dirname(os.path.abspath(__file__))
 
+def get_resource_path(relative_path):
+    """获取资源文件的绝对路径，兼容开发环境和 PyInstaller onefile 打包"""
+    if getattr(sys, 'frozen', False):
+        # 打包后，资源文件位于 _MEIPASS 临时目录
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    else:
+        # 开发环境，资源文件在脚本所在目录
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
 
 def get_icon_path():
     icon_filename = "ico.ico"
@@ -95,6 +114,32 @@ def set_dll_search_path():
                     print(f"[DLL] 已从 {d} 加载")
                 except:
                     pass
+
+
+# ====================== ip2region ======================
+HAS_IP2REGION = False
+ip2region_searcher = None
+IP2REGION_DB_PATH = get_resource_path("ip2region.xdb")
+IP_VERSION = util.IPv4 if util else None
+
+def init_ip2region():
+    """加载 ip2region 官方库，若失败则标记为不可用"""
+    global HAS_IP2REGION, ip2region_searcher
+    if util is None or xdb is None:
+        print("[ip2region] 依赖库未安装，跳过本地查询")
+        return
+    if not os.path.exists(IP2REGION_DB_PATH):
+        print(f"[ip2region] 未找到数据库文件: {IP2REGION_DB_PATH}，将使用在线API")
+        return
+    try:
+        util.verify_from_file(IP2REGION_DB_PATH)
+        ip2region_searcher = xdb.new_with_file_only(IP_VERSION, IP2REGION_DB_PATH)
+        HAS_IP2REGION = True
+        print("[ip2region] 官方库初始化成功")
+    except Exception as e:
+        print(f"[ip2region] 初始化失败: {e}，将使用在线API")
+        ip2region_searcher = None
+        HAS_IP2REGION = False
 
 
 # ====================== WinDivert 驱动安装 ======================
@@ -147,7 +192,7 @@ UDP_PORTS_TO_MONITOR = {6672, 61455, 61456, 61457, 61458}
 TARGET_PROCESS_KEYWORDS = ["GTA5", "GTA5_Enhanced", "RDR2"]
 
 TRADE_SERVER_IPS = {"192.81.245.200", "192.81.245.201"}
-CLOUD_SAVE_SERVER_IPS = {"192.81.241.171"}
+CLOUD_SAVE_SERVER_IPS = {"192.81.241.171","192.81.241.191"}
 ROCKSTAR_DOMAINS = {
     "conductor-prod.ros.rockstargames.com",
     "patches.rockstargames.com",
@@ -221,19 +266,32 @@ def reverse_dns_lookup(ip):
         return None
 
 
-def get_rockstar_server_type(ip, domain, asn_info):
+def get_rockstar_server_type(ip, domain, asn_info=None):
+    # 1. 硬编码 IP 列表
     if ip in TRADE_SERVER_IPS:
         return "官方-交易服务器"
     elif ip in CLOUD_SAVE_SERVER_IPS:
         return "官方-云存档服务器"
+
+    # 2. 域名匹配（支持通配）
     if domain:
+        domain_lower = domain.lower()
+        # 精确列表匹配
         for rd in ROCKSTAR_DOMAINS:
-            if rd in domain:
+            if rd in domain_lower:
                 return "官方-CDN服务器与云服务器"
+        # 泛域名匹配（新增）
+        if "rockstargames.com" in domain_lower or "take-two" in domain_lower:
+            return "官方-其他服务器"
+
+    # 3. IP 范围匹配
     if any(ip.startswith(r) for r in ROCKSTAR_IP_RANGES):
         return "官方-中转服务器"
+
+    # 4. ASN 信息匹配（来自 API 或 ip2region 的 ISP）
     if asn_info and ("take-two" in asn_info.lower() or "take two" in asn_info.lower()):
         return "官方-其他服务器"
+
     return None
 
 
@@ -270,46 +328,153 @@ def get_friendly_isp_name(isp_data, org_data, as_data):
     return truncate_mixed_string(isp_data, 25) if isp_data else "未知"
 
 
+# ====================== 核心修改：get_geo_info ======================
+def decode_ip2region_bytes(data):
+    """尝试多种编码解码 ip2region 返回的字节数据"""
+    encodings = ['gb18030', 'gbk', 'gb2312', 'big5', 'utf-8', 'latin-1']
+    for enc in encodings:
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    # 所有编码均失败，使用 replace 避免崩溃
+    return data.decode('utf-8', errors='replace')
+
+
 def get_geo_info(ip):
+    # 先检查缓存
     if ip in geo_cache:
         return geo_cache[ip]
+
     if not is_public_ip(ip):
         info = ("区域网", "-", False, None)
         geo_cache[ip] = info
         return info
+
+    # ---------- 初始化变量 ----------
+    ip2_location = None
+    ip2_is_chinese = False
+    ip2_isp = None
+
+    # ---------- 1. 尝试 ip2region 获取地区 ----------
+    if ip2region_searcher is not None:
+        try:
+            region_raw = ip2region_searcher.search(ip)
+            if region_raw:
+                if isinstance(region_raw, bytes):
+                    region_str = decode_ip2region_bytes(region_raw)
+                else:
+                    region_str = region_raw
+
+                parts = region_str.split('|')
+                while len(parts) < 5:
+                    parts.append('')
+
+                country = parts[0].strip()
+                area = parts[1].strip() if len(parts) > 1 else ""
+                province = parts[2].strip() if len(parts) > 2 else ""
+                city = parts[3].strip() if len(parts) > 3 else ""
+                isp = parts[4].strip() if len(parts) > 4 else ""
+
+                def clean(s):
+                    return s if s and s not in ("0", "0.0", "未知") else ""
+
+                country = clean(country)
+                area = clean(area)
+                province = clean(province)
+                city = clean(city)
+                isp = clean(isp)
+
+                # 判断是否为大陆（裸连）
+                non_mainland_keywords = ["香港", "澳门", "台湾", "Hong Kong", "Macau", "Taiwan"]
+                is_hk_mo_tw = any(kw in (area + province + city) or kw in country for kw in non_mainland_keywords)
+                ip2_is_chinese = (country in ("中国", "China")) and not is_hk_mo_tw
+
+                # 构建地区
+                if country in ("中国", "China"):
+                    if province and city:
+                        if city.startswith(province) or province.startswith(city):
+                            location = province
+                        else:
+                            location = f"{province}{city}"
+                    elif province:
+                        location = province
+                    elif area:
+                        location = area
+                    elif country:
+                        location = country
+                    else:
+                        location = "未知"
+                else:
+                    loc_parts = [country] if country else []
+                    if province and province != country:
+                        loc_parts.append(province)
+                    if city and city not in (country, province):
+                        loc_parts.append(city)
+                    location = " ".join(loc_parts[:2]) if loc_parts else "未知"
+
+                if location:
+                    ip2_location = location
+                if isp:
+                    ip2_isp = isp
+        except Exception as e:
+            print(f"[ip2region] 查询 {ip} 失败: {e}")
+
+    # ---------- 2. 调用公开 API 获取完整信息 ----------
+    api_success = False
+    api_country = api_region = api_city = api_isp = api_org = api_as = api_domain = ""
+
     try:
-        domain = reverse_dns_lookup(ip)
         url = f"http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,regionName,city,isp,org,as"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=8)
         if r.status_code == 200:
             d = r.json()
             if d.get('status') == 'success':
-                country = d.get('country', '')
-                region = d.get('regionName', '')
-                city = d.get('city', '')
-                is_chinese = (country == '中国')
-                if is_chinese:
-                    location = f"{region}{city}" if city else region
-                else:
-                    location_parts = []
-                    if country:
-                        location_parts.append(country)
-                    if region and region != city:
-                        location_parts.append(region)
-                    if city:
-                        location_parts.append(city)
-                    location = " ".join(location_parts[:2])
-                isp_raw = d.get('isp', '')
-                org_raw = d.get('org', '')
-                as_raw = d.get('as', '')
-                friendly_isp = get_friendly_isp_name(isp_raw, org_raw, as_raw)
-                server_type = get_rockstar_server_type(ip, domain, as_raw or org_raw)
-                info = (location.strip() or "未知", friendly_isp, is_chinese, server_type)
-                geo_cache[ip] = info
-                return info
+                api_success = True
+                api_country = d.get('country', '')
+                api_region = d.get('regionName', '')
+                api_city = d.get('city', '')
+                api_isp = d.get('isp', '')
+                api_org = d.get('org', '')
+                api_as = d.get('as', '')
+                api_domain = reverse_dns_lookup(ip)
     except Exception:
         pass
-    info = ("未知", "-", False, None)
+
+    # ---------- 3. 组合最终结果 ----------
+    if ip2_is_chinese:
+        location = ip2_location if ip2_location else "未知"
+        is_chinese = True
+    else:
+        if api_success and (api_country or api_region or api_city):
+            if api_country == '中国':
+                location = f"{api_region}{api_city}" if api_city else (api_region or api_country)
+            else:
+                loc_parts = []
+                if api_country:
+                    loc_parts.append(api_country)
+                if api_region and api_region != api_city:
+                    loc_parts.append(api_region)
+                if api_city:
+                    loc_parts.append(api_city)
+                location = " ".join(loc_parts[:2]) if loc_parts else api_country
+            if not location.strip():
+                location = "未知"
+        else:
+            location = ip2_location if ip2_location else "未知"
+        is_chinese = False
+
+    # ---------- 4. ISP 与服务器类型 ----------
+    if api_success:
+        friendly_isp = get_friendly_isp_name(api_isp, api_org, api_as)
+        isp = friendly_isp
+        server_type = get_rockstar_server_type(ip, api_domain, api_as or api_org)
+    else:
+        isp = ip2_isp if ip2_isp else "未知"
+        domain = reverse_dns_lookup(ip) if not api_domain else api_domain
+        server_type = get_rockstar_server_type(ip, domain, ip2_isp)
+
+    info = (location, isp, is_chinese, server_type)
     geo_cache[ip] = info
     return info
 
@@ -1210,6 +1375,9 @@ class MainWindow(QMainWindow):
         self.blacklist_file = os.path.join(self.base_path, "permanent_blacklist.txt")
         self.permanent_blacklist = set()
         self.load_blacklist()
+
+        # 初始化 ip2region（新增）
+        init_ip2region()
 
         threading.Thread(target=sniffer, daemon=True).start()
         threading.Thread(target=sampler, daemon=True).start()
