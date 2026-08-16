@@ -201,7 +201,7 @@ ROCKSTAR_DOMAINS = {
 }
 ROCKSTAR_IP_RANGES = ["52.139."]
 
-# ====================== 辅助函数 ======================
+# ====================== 辅助 函数 ======================
 geo_cache = {}
 dns_cache = {}
 data_lock = threading.Lock()
@@ -330,13 +330,15 @@ def get_geo_info(ip):
     if ip in geo_cache:
         return geo_cache[ip]
     if not is_public_ip(ip):
-        info = ("区域网", "-", False, None)
+        info = ("区域网", "-", False, None, False)
         geo_cache[ip] = info
         return info
+
+    # ---------- 备用：ip2region 地区 & ISP ----------
     ip2_location = None
     ip2_is_chinese = False
     ip2_isp = None
-    # ---------- 1. 尝试 ip2region 获取地区 ----------
+
     if ip2region_searcher is not None:
         try:
             region_raw = ip2region_searcher.search(ip)
@@ -345,11 +347,9 @@ def get_geo_info(ip):
                     region_str = decode_ip2region_bytes(region_raw)
                 else:
                     region_str = region_raw
-
                 parts = region_str.split('|')
                 while len(parts) < 5:
                     parts.append('')
-
                 country = parts[0].strip()
                 area = parts[1].strip() if len(parts) > 1 else ""
                 province = parts[2].strip() if len(parts) > 2 else ""
@@ -358,15 +358,13 @@ def get_geo_info(ip):
 
                 def clean(s):
                     return s if s and s not in ("0", "0.0", "未知") else ""
+                country = clean(country); area = clean(area)
+                province = clean(province); city = clean(city); isp = clean(isp)
 
-                country = clean(country)
-                area = clean(area)
-                province = clean(province)
-                city = clean(city)
-                isp = clean(isp)
-                non_mainland_keywords = ["香港", "澳门", "台湾", "Hong Kong", "Macau", "Taiwan"]
-                is_hk_mo_tw = any(kw in (area + province + city) or kw in country for kw in non_mainland_keywords)
+                non_mainland = ["香港", "澳门", "台湾", "Hong Kong", "Macau", "Taiwan"]
+                is_hk_mo_tw = any(kw in (area + province + city) or kw in country for kw in non_mainland)
                 ip2_is_chinese = (country in ("中国", "China")) and not is_hk_mo_tw
+
                 if country in ("中国", "China"):
                     if province and city:
                         if city.startswith(province) or province.startswith(city):
@@ -394,50 +392,62 @@ def get_geo_info(ip):
                     ip2_isp = isp
         except Exception as e:
             print(f"[ip2region] 查询 {ip} 失败: {e}")
-    # ---------- 2. 调用公开 API 获取完整信息 ----------
+
+    # ---------- 优先：API 完整查询----------
     api_success = False
     api_country = api_region = api_city = api_isp = api_org = api_as = api_domain = ""
 
-    try:
-        url = f"http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,regionName,city,isp,org,as"
-        r = requests.get(url, timeout=8)
-        if r.status_code == 200:
-            d = r.json()
-            if d.get('status') == 'success':
-                api_success = True
-                api_country = d.get('country', '')
-                api_region = d.get('regionName', '')
-                api_city = d.get('city', '')
-                api_isp = d.get('isp', '')
-                api_org = d.get('org', '')
-                api_as = d.get('as', '')
-                api_domain = reverse_dns_lookup(ip)
-    except Exception:
-        pass
-    # ---------- 3. 组合最终结果 ----------
-    if ip2_is_chinese:
-        location = ip2_location if ip2_location else "未知"
-        is_chinese = True
-    else:
-        if api_success and (api_country or api_region or api_city):
-            if api_country == '中国':
-                location = f"{api_region}{api_city}" if api_city else (api_region or api_country)
-            else:
-                loc_parts = []
-                if api_country:
-                    loc_parts.append(api_country)
-                if api_region and api_region != api_city:
-                    loc_parts.append(api_region)
-                if api_city:
-                    loc_parts.append(api_city)
-                location = " ".join(loc_parts[:2]) if loc_parts else api_country
-            if not location.strip():
-                location = "未知"
+    max_retries = 5
+    retry_delay = 1
+
+    for attempt in range(max_retries):
+        try:
+            url = f"http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,regionName,city,isp,org,as"
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get('status') == 'success':
+                    api_success = True
+                    api_country = d.get('country', '')
+                    api_region = d.get('regionName', '')
+                    api_city = d.get('city', '')
+                    api_isp = d.get('isp', '')
+                    api_org = d.get('org', '')
+                    api_as = d.get('as', '')
+                    api_domain = reverse_dns_lookup(ip)
+                    break
+        except Exception:
+            pass
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+
+    # ---------- 组合地区 ----------
+    using_fallback = False
+    api_has_region = bool(api_success and (api_country or api_region or api_city))
+    if api_has_region:
+        if api_country == '中国':
+            location = f"{api_region}{api_city}" if api_city else (api_region or api_country)
         else:
-            location = ip2_location if ip2_location else "未知"
-        is_chinese = False
-    # ---------- 4. ISP 与服务器类型 ----------
-    if api_success:
+            loc_parts = []
+            if api_country:
+                loc_parts.append(api_country)
+            if api_region and api_region != api_city:
+                loc_parts.append(api_region)
+            if api_city:
+                loc_parts.append(api_city)
+            location = " ".join(loc_parts[:2]) if loc_parts else api_country
+        if not location.strip():
+            location = "未知"
+        non_mainland = ["香港", "澳门", "台湾", "Hong Kong", "Macau", "Taiwan"]
+        is_hk_mo_tw = any(kw in (api_region + api_city) or kw in api_country for kw in non_mainland)
+        is_chinese = (api_country == '中国') and not is_hk_mo_tw
+    else:
+        location = ip2_location if ip2_location else "未知"
+        is_chinese = ip2_is_chinese
+        using_fallback = True
+
+    # ---------- ISP 与服务器类型 ----------
+    if api_success and (api_isp or api_org or api_as):
         friendly_isp = get_friendly_isp_name(api_isp, api_org, api_as)
         isp = friendly_isp
         server_type = get_rockstar_server_type(ip, api_domain, api_as or api_org)
@@ -446,7 +456,7 @@ def get_geo_info(ip):
         domain = reverse_dns_lookup(ip) if not api_domain else api_domain
         server_type = get_rockstar_server_type(ip, domain, ip2_isp)
 
-    info = (location, isp, is_chinese, server_type)
+    info = (location, isp, is_chinese, server_type, using_fallback)
     geo_cache[ip] = info
     return info
 
@@ -459,6 +469,7 @@ class Peer:
         self.isp = "-"
         self.is_chinese = False
         self.server_type = None
+        self.using_fallback = False
         self.last_total_bytes = 0
         self.last_seen = time.time()
         self.history = deque(maxlen=HISTORY_SIZE)
@@ -470,12 +481,14 @@ class Peer:
             self.isp = "-"
             self.is_chinese = False
             self.server_type = None
+            self.using_fallback = False
             return
-        location, isp, is_chinese, server_type = get_geo_info(self.ip)
+        location, isp, is_chinese, server_type, using_fallback = get_geo_info(self.ip)
         self.location = location
         self.isp = isp
         self.is_chinese = is_chinese
         self.server_type = server_type
+        self.using_fallback = using_fallback
 
     def record_sample(self, current_total_bytes):
         delta = current_total_bytes - self.last_total_bytes
@@ -666,7 +679,7 @@ def run_solo_filter():
             pass
 
 
-def run_locked_filter():
+def run_locked_filter(counter, msg_queue):
     set_dll_search_path()
     try:
         import pydivert
@@ -681,6 +694,17 @@ def run_locked_filter():
                 continue
             size = len(packet.payload)
             if size in matchmaking_sizes:
+                with counter.get_lock():
+                    counter.value += 1
+                if packet.is_inbound:
+                    blocked_ip = packet.src_addr
+                else:
+                    blocked_ip = packet.dst_addr
+                server_type = get_rockstar_server_type(blocked_ip, None, None)
+                try:
+                    msg_queue.put((blocked_ip, server_type), timeout=0.1)
+                except queue.Full:
+                    pass
                 continue
             w.send(packet)
     except Exception as e:
@@ -1170,6 +1194,8 @@ class SessionManager:
         self.locked_process = None
         self.solo_running = False
         self.locked_running = False
+        self.locked_counter = None
+        self.locked_msg_queue = None
 
     def start_solo_session(self):
         if self.solo_running:
@@ -1196,7 +1222,13 @@ class SessionManager:
         if self.solo_running:
             return False, "请先关闭卡单人战局"
         self.locked_running = True
-        self.locked_process = multiprocessing.Process(target=run_locked_filter, daemon=True)
+        self.locked_counter = multiprocessing.Value('i', 0)
+        self.locked_msg_queue = multiprocessing.Queue()
+        self.locked_process = multiprocessing.Process(
+            target=run_locked_filter,
+            args=(self.locked_counter, self.locked_msg_queue),
+            daemon=True
+        )
         self.locked_process.start()
         return True, "战局锁已启动，新玩家无法加入"
 
@@ -1207,7 +1239,9 @@ class SessionManager:
         if self.locked_process and self.locked_process.is_alive():
             self.locked_process.terminate()
             self.locked_process.join(0.5)
+        self.locked_counter = None
         return True, "战局锁已停止"
+
     def stop_all(self):
         """停止所有正在运行的战局管理进程"""
         if self.solo_running:
@@ -1222,6 +1256,8 @@ class SessionControlTab(QWidget):
         super().__init__(parent)
         self.parent = parent
         self.session_manager = SessionManager()
+        self.lock_count_timer = QTimer()
+        self.lock_count_timer.timeout.connect(self.update_lock_count)
         self.setup_ui()
 
     def setup_ui(self):
@@ -1231,8 +1267,10 @@ class SessionControlTab(QWidget):
         status_layout = QFormLayout(self.status_group)
         self.solo_status_label = QLabel("未启动")
         self.locked_status_label = QLabel("未启动")
+        self.locked_block_count_label = QLabel("0")
         status_layout.addRow("卡单人战局:", self.solo_status_label)
         status_layout.addRow("战局锁:", self.locked_status_label)
+        status_layout.addRow("已阻止加入次数:", self.locked_block_count_label)
         layout.addWidget(self.status_group)
 
         btn_group = QGroupBox("控制面板")
@@ -1292,6 +1330,8 @@ class SessionControlTab(QWidget):
         if success:
             self.locked_status_label.setText("运行中")
             self.locked_status_label.setStyleSheet("color: green;")
+            self.locked_block_count_label.setText("0")
+            self.lock_count_timer.start(50)
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 战局锁已启动")
             QMessageBox.information(self, "成功", msg)
         else:
@@ -1302,11 +1342,39 @@ class SessionControlTab(QWidget):
         if success:
             self.locked_status_label.setText("未启动")
             self.locked_status_label.setStyleSheet("color: red;")
+            self.lock_count_timer.stop()
+            self.locked_block_count_label.setText("-")
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 战局锁已停止")
             QMessageBox.information(self, "成功", msg)
         else:
             QMessageBox.warning(self, "警告", msg)
 
+    def update_lock_count(self):
+        """实时刷新阻止计数，并显示被阻止的 IP"""
+        if not self.session_manager.locked_running:
+            self.lock_count_timer.stop()
+            self.locked_block_count_label.setText("-")
+            return
+        counter = self.session_manager.locked_counter
+        if counter is None:
+            return
+        current = counter.value
+        self.locked_block_count_label.setText(str(current))
+        msg_queue = self.session_manager.locked_msg_queue
+        if msg_queue:
+            count = 0
+            while count < 100:
+                try:
+                    item = msg_queue.get_nowait()
+                    ip, server_type = item
+                    timestamp = time.strftime('%H:%M:%S')
+                    if server_type == "官方-中转服务器":
+                        self.log_text.append(f"[{timestamp}] 已阻止此IP加入请求：{ip} [中转]")
+                    else:
+                        self.log_text.append(f"[{timestamp}] 已阻止此IP加入请求：{ip}")
+                    count += 1
+                except queue.Empty:
+                    break
 
 # ====================== 主窗口 ======================
 class MainWindow(QMainWindow):
@@ -1348,7 +1416,6 @@ class MainWindow(QMainWindow):
         self.permanent_blacklist = set()
         self.load_blacklist()
 
-        # 初始化 ip2region（新增）
         init_ip2region()
 
         threading.Thread(target=sniffer, daemon=True).start()
@@ -2157,6 +2224,8 @@ class MainWindow(QMainWindow):
                     location_display += " [裸连]"
                 if p.server_type:
                     location_display += f" [{p.server_type}]"
+                if p.using_fallback:
+                    location_display += " [地区可能有误]"
                 if s['is_lagger']:
                     location_display += " [疑似卡逼]"
 
@@ -2183,6 +2252,10 @@ class MainWindow(QMainWindow):
 
         self.proc_monitor.stop()
         self.proc_monitor.wait()
+
+        # 停止战局锁定时器（新增）
+        if hasattr(self.session_tab, 'lock_count_timer'):
+            self.session_tab.lock_count_timer.stop()
 
         self.session_tab.session_manager.stop_all()
 
