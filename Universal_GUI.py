@@ -1471,7 +1471,7 @@ class SessionControlTab(QWidget):
         if self.current_mode == 'v1':
             self.stop_locked_session()
         if self.current_mode == 'v2':
-            QMessageBox.warning(self, "警告", "方式二已在运行中")
+            QMessageBox.warning(self, "警告", "端点白名单战局锁已在运行中")
             return
         self.locked_start_btn_v2.setEnabled(False)
         self.locked_start_btn_v2.setText("启动中...")
@@ -1481,7 +1481,7 @@ class SessionControlTab(QWidget):
 
     def _on_start_v2_finished(self, success, msg):
         self.locked_start_btn_v2.setEnabled(True)
-        self.locked_start_btn_v2.setText("启动战局锁（方式二）")
+        self.locked_start_btn_v2.setText("启动端点白名单战局锁")
 
         if success:
             self.locked_status_label.setText("运行中")
