@@ -24,11 +24,12 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGroupBox, QFormLayout, QLineEdit,
                              QTextEdit, QComboBox, QDialog, QMenu, QSystemTrayIcon,
                              QDialogButtonBox, QCheckBox, QStackedWidget, QFrame, QSizePolicy,
-                             QStyle, QToolButton)
-from PySide6.QtCore import (Qt, QTimer, Signal, QThread, QEvent, QSize, QPoint, QRect,
+                             QStyle, QToolButton, QAbstractButton)
+from PySide6.QtCore import (Qt, QTimer, Signal, QThread, QEvent, QSize, QPoint, QPointF, QRect, QRectF,
                             QPropertyAnimation, QParallelAnimationGroup, QEasingCurve)
 from PySide6.QtGui import (QColor, QBrush, QFont, QIcon, QAction, QGuiApplication, QPalette,
-                           QPainter, QPen, QPixmap, QFontDatabase, QMouseEvent)
+                           QPainter, QPen, QPixmap, QFontDatabase, QMouseEvent, QRadialGradient,
+                           QCursor, QPainterPath, QRegion)
 
 
 # ====================== 音效初始化 ======================
@@ -256,8 +257,14 @@ def ensure_windivert_driver():
 
     try:
         base = get_base_path()
-        ctl_path = os.path.join(base, "windivertctl.exe")
-        if not os.path.exists(ctl_path):
+        candidates = [
+            os.path.join(base, "windivertctl.exe"),
+            os.path.join(base, "SessionManagerRuntime", "windivertctl.exe"),
+        ]
+        if hasattr(sys, "_MEIPASS"):
+            candidates.append(os.path.join(sys._MEIPASS, "windivertctl.exe"))
+        ctl_path = next((path for path in candidates if os.path.exists(path)), None)
+        if ctl_path is None:
             print("[驱动] windivertctl.exe 未找到")
             return False
         subprocess.run([ctl_path, "uninstall"], capture_output=True, timeout=5)
@@ -1320,6 +1327,117 @@ class AcceleratorTestThread(QThread):
 
 
 # ====================== 战局管理器 ======================
+class RevealOverlay(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._cursor = None
+
+    def set_cursor(self, pos):
+        self._cursor = pos
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        parent = self.parentWidget()
+        if parent is not None:
+            dpr = self.devicePixelRatioF() or 1.0
+            backdrop = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+            backdrop.setDevicePixelRatio(dpr)
+            backdrop.fill(Qt.GlobalColor.transparent)
+            parent.render(backdrop, QPoint(0, 0), QRegion(), QWidget.RenderFlag.DrawWindowBackground)
+            painter.drawPixmap(0, 0, backdrop)
+        if self._cursor is None:
+            return
+        accent = QColor(CURRENT_ACCENT)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        parent = self.parent()
+        if parent is not None and parent.objectName() == "NavigationTile":
+            radius = 0.0
+        elif parent is not None and parent.objectName() == "NavigationToggle":
+            radius = 2.0
+        else:
+            radius = 3.0
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        glow = QRadialGradient(QPointF(self._cursor), 160.0)
+        color = QColor(accent)
+        color.setAlpha(32)
+        glow.setColorAt(0.0, color)
+        edge = QColor(accent)
+        edge.setAlpha(0)
+        glow.setColorAt(1.0, edge)
+        painter.fillPath(path, QBrush(glow))
+
+        border = QRadialGradient(QPointF(self._cursor), 90.0)
+        color = QColor(accent).lighter(115)
+        color.setAlpha(255)
+        border.setColorAt(0.0, color)
+        edge = QColor(accent)
+        edge.setAlpha(0)
+        border.setColorAt(1.0, edge)
+        painter.setPen(QPen(QBrush(border), 1.0))
+        painter.drawPath(path)
+
+
+class UwpNavButton(QAbstractButton):
+    def __init__(self, glyph, label, checkable=True, parent=None):
+        super().__init__(parent)
+        self.glyph = glyph
+        self.label = label
+        self._expanded = False
+        self.setObjectName("NavigationTile")
+        self.setCheckable(checkable)
+        self.setToolTip(label)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFixedSize(52, 52)
+
+    def set_expanded(self, expanded):
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self.setFixedSize(204 if expanded else 52, 52)
+        self.update()
+
+    def paintEvent(self, event):
+        tokens = get_theme_tokens()
+        accent = QColor(CURRENT_ACCENT)
+        text_color = QColor(tokens["text"])
+        icon_color = QColor(accent) if self.isChecked() else text_color
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        glyph_font = QFont("Segoe Fluent Icons")
+        if not QFontDatabase.hasFamily("Segoe Fluent Icons"):
+            glyph_font = QFont("Segoe MDL2 Assets")
+        glyph_font.setPixelSize(24)
+
+        if self._expanded:
+            painter.setFont(glyph_font)
+            painter.setPen(icon_color)
+            painter.drawText(QRect(14, 0, 24, self.height()), Qt.AlignmentFlag.AlignCenter, self.glyph)
+            text_font = QFont(APP_FONT_FAMILY)
+            text_font.setPointSize(10)
+            painter.setFont(text_font)
+            painter.setPen(text_color)
+            width = self.width() - 62
+            text = painter.fontMetrics().elidedText(self.label, Qt.TextElideMode.ElideRight, width)
+            painter.drawText(QRect(52, 0, width, self.height()),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+        else:
+            painter.setFont(glyph_font)
+            painter.setPen(icon_color)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.glyph)
+
+        if self.hasFocus():
+            painter.setPen(QPen(accent, 1.0))
+            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+
 class SnapPreviewWindow(QWidget):
     def __init__(self):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
@@ -1877,6 +1995,13 @@ class MainWindow(QMainWindow):
         self._hiding_to_tray = False
         self._closing = False
         self._max_toggle_running = False
+        self._uwp_mode = sys.platform == "win32" and uwp_style_enabled()
+        self._uwp_expanded = False
+        self._reveal_overlay = None
+        if self._uwp_mode:
+            app_instance = QApplication.instance()
+            if isinstance(app_instance, QApplication):
+                app_instance.installEventFilter(self)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
         self.resize(1280, 760)
@@ -2463,7 +2588,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(500, self._really_restart)
 
     def _really_restart(self):
-        os.execl(sys.executable, sys.executable, *sys.argv)
+        if getattr(sys, "frozen", False):
+            os.execl(sys.executable, sys.executable, *sys.argv[1:])
+        else:
+            os.execl(sys.executable, sys.executable, *sys.argv)
 
     def setup_ui(self):
         self.monitor_tab = QWidget()
@@ -2546,44 +2674,66 @@ class MainWindow(QMainWindow):
         self.navigation_panel = QFrame()
         self.navigation_panel.setObjectName("NavigationPanel")
         self.navigation_collapsed = False
-        self.navigation_panel.setFixedWidth(240 if get_windows_build() >= 22000 else 220)
+        if self._uwp_mode:
+            self.navigation_panel.setFixedWidth(68)
+        else:
+            self.navigation_panel.setFixedWidth(240 if get_windows_build() >= 22000 else 220)
         nav_layout = QVBoxLayout(self.navigation_panel)
         nav_layout.setContentsMargins(8, 10, 8, 10)
         nav_layout.setSpacing(5)
 
-        nav_header = QHBoxLayout()
-        self.navigation_toggle = QPushButton()
-        self.navigation_toggle.setObjectName("NavigationToggle")
-        self.navigation_toggle.setFixedSize(38, 38)
-        self.navigation_toggle.setIconSize(QSize(16, 16))
-        self.navigation_toggle.setToolTip("收起导航栏")
-        self.navigation_toggle.clicked.connect(self.toggle_navigation)
-        nav_header.addWidget(self.navigation_toggle)
-        nav_header.addStretch(1)
-        nav_layout.addLayout(nav_header)
-        nav_layout.addSpacing(12)
-
         self.navigation_buttons = []
         nav_labels = ["战局 IP 检测", "路由模式加速器检测", "网络战局锁"]
-        for index, label in enumerate(nav_labels):
-            button = QPushButton(label)
-            button.setObjectName("NavigationButton")
-            button.setIconSize(QSize(20, 20))
-            button.setCheckable(True)
-            button.setMinimumHeight(44)
-            button.setToolTip(label)
-            button.clicked.connect(lambda checked=False, i=index: self.switch_navigation_page(i))
-            nav_layout.addWidget(button)
-            self.navigation_buttons.append(button)
-        nav_layout.addStretch(1)
-
-        self.nav_settings_button = QPushButton("软件设置")
-        self.nav_settings_button.setObjectName("NavigationButton")
-        self.nav_settings_button.setIconSize(QSize(20, 20))
-        self.nav_settings_button.setMinimumHeight(44)
-        self.nav_settings_button.setToolTip("软件设置")
-        self.nav_settings_button.clicked.connect(self.open_settings_dialog)
-        nav_layout.addWidget(self.nav_settings_button)
+        if self._uwp_mode:
+            nav_layout.setSpacing(10)
+            self.navigation_toggle = QPushButton()
+            self.navigation_toggle.setObjectName("NavigationToggle")
+            self.navigation_toggle.setFixedSize(52, 38)
+            self.navigation_toggle.setIconSize(QSize(18, 18))
+            self.navigation_toggle.setToolTip("展开导航栏")
+            self.navigation_toggle.clicked.connect(self.toggle_uwp_navigation)
+            nav_layout.addWidget(self.navigation_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+            nav_layout.addSpacing(6)
+            glyphs = ["\uE701", "\uE8D7", "\uE83D"]
+            for index, label in enumerate(nav_labels):
+                button = UwpNavButton(glyphs[index], label)
+                button.clicked.connect(lambda checked=False, i=index: self.switch_navigation_page(i))
+                nav_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+                self.navigation_buttons.append(button)
+            nav_layout.addStretch(1)
+            self.nav_settings_button = UwpNavButton("\uE713", "软件设置", checkable=False)
+            self.nav_settings_button.clicked.connect(self.open_settings_dialog)
+            nav_layout.addWidget(self.nav_settings_button, 0, Qt.AlignmentFlag.AlignLeft)
+        else:
+            nav_header = QHBoxLayout()
+            self.navigation_toggle = QPushButton()
+            self.navigation_toggle.setObjectName("NavigationToggle")
+            self.navigation_toggle.setFixedSize(38, 38)
+            self.navigation_toggle.setIconSize(QSize(16, 16))
+            self.navigation_toggle.setToolTip("收起导航栏")
+            self.navigation_toggle.clicked.connect(self.toggle_navigation)
+            nav_header.addWidget(self.navigation_toggle)
+            nav_header.addStretch(1)
+            nav_layout.addLayout(nav_header)
+            nav_layout.addSpacing(12)
+            for index, label in enumerate(nav_labels):
+                button = QPushButton(label)
+                button.setObjectName("NavigationButton")
+                button.setIconSize(QSize(20, 20))
+                button.setCheckable(True)
+                button.setMinimumHeight(44)
+                button.setToolTip(label)
+                button.clicked.connect(lambda checked=False, i=index: self.switch_navigation_page(i))
+                nav_layout.addWidget(button)
+                self.navigation_buttons.append(button)
+            nav_layout.addStretch(1)
+            self.nav_settings_button = QPushButton("软件设置")
+            self.nav_settings_button.setObjectName("NavigationButton")
+            self.nav_settings_button.setIconSize(QSize(20, 20))
+            self.nav_settings_button.setMinimumHeight(44)
+            self.nav_settings_button.setToolTip("软件设置")
+            self.nav_settings_button.clicked.connect(self.open_settings_dialog)
+            nav_layout.addWidget(self.nav_settings_button)
         self._update_nav_icons()
 
         content_column = QVBoxLayout()
@@ -2606,14 +2756,64 @@ class MainWindow(QMainWindow):
         self.switch_navigation_page(0)
 
     def _update_nav_icons(self):
-        color = get_theme_tokens()["text"]
+        text_color = get_theme_tokens()["text"]
+        if self._uwp_mode:
+            for button in list(self.navigation_buttons) + [self.nav_settings_button]:
+                button.update()
+            self.navigation_toggle.setIcon(nav_glyph_icon("\uE700", text_color, 18))
+            return
         glyphs = ["\uE701", "\uE8D7", "\uE83D", "\uE713"]
         buttons = list(self.navigation_buttons) + [self.nav_settings_button]
         for button, glyph in zip(buttons, glyphs):
-            button.setIcon(nav_glyph_icon(glyph, color))
+            button.setIcon(nav_glyph_icon(glyph, text_color, 20))
             button.setIconSize(QSize(20, 20))
         self.navigation_toggle.setIcon(nav_glyph_icon(
-            "\uE76C" if self.navigation_collapsed else "\uE76B", color, 16))
+            "\uE76C" if self.navigation_collapsed else "\uE76B", text_color, 16))
+
+    def toggle_uwp_navigation(self):
+        self._set_uwp_expanded(not self._uwp_expanded)
+
+    def _apply_uwp_nav_items(self, expanded):
+        buttons = list(self.navigation_buttons) + [self.nav_settings_button]
+        for button in buttons:
+            button.set_expanded(expanded)
+        overlay = self._active_overlay()
+        if overlay is not None and overlay.parentWidget() in buttons:
+            overlay.setGeometry(overlay.parentWidget().rect())
+        self._update_nav_icons()
+
+    def _set_uwp_expanded(self, expanded, animate=True):
+        target = 224 if expanded else 68
+        self._uwp_expanded = expanded
+        if expanded:
+            self._apply_uwp_nav_items(True)
+        self.navigation_toggle.setToolTip("收起导航栏" if expanded else "展开导航栏")
+        if not animate or not self.isVisible():
+            self._apply_uwp_nav_items(expanded)
+            self.navigation_panel.setFixedWidth(target)
+            return
+        current = self.navigation_panel.width()
+        if current == target:
+            self._apply_uwp_nav_items(expanded)
+            self.navigation_panel.setFixedWidth(target)
+            return
+        if getattr(self, "_nav_animation", None) is not None:
+            self._nav_animation.stop()
+        self._nav_animation = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            animation = QPropertyAnimation(self.navigation_panel, prop, self)
+            animation.setDuration(180)
+            animation.setStartValue(current)
+            animation.setEndValue(target)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._nav_animation.addAnimation(animation)
+
+        def finish():
+            self.navigation_panel.setFixedWidth(target)
+            self._apply_uwp_nav_items(expanded)
+
+        self._nav_animation.finished.connect(finish)
+        self._nav_animation.start()
 
     def eventFilter(self, watched, event):
         if watched is getattr(self, "title_bar", None) and isinstance(event, QMouseEvent):
@@ -2631,7 +2831,49 @@ class MainWindow(QMainWindow):
                 if getattr(self, "_window_dragging", False):
                     self._finish_window_drag(event.globalPosition().toPoint())
                 return True
+        if self._uwp_mode and isinstance(watched, QAbstractButton) \
+                and not isinstance(watched, QCheckBox) \
+                and watched.objectName() not in ("WindowControlButton", "WindowCloseButton"):
+            self._handle_button_reveal(watched, event)
         return super().eventFilter(watched, event)
+
+    def _active_overlay(self):
+        overlay = self._reveal_overlay
+        if overlay is None:
+            return None
+        try:
+            overlay.parentWidget()
+        except RuntimeError:
+            self._reveal_overlay = None
+            return None
+        return overlay
+
+    def _on_overlay_destroyed(self, *args):
+        self._reveal_overlay = None
+
+    def _handle_button_reveal(self, button, event):
+        kind = event.type()
+        if kind in (QEvent.Type.Enter, QEvent.Type.MouseMove):
+            overlay = self._active_overlay()
+            if overlay is None:
+                overlay = RevealOverlay(button)
+                overlay.destroyed.connect(self._on_overlay_destroyed)
+                self._reveal_overlay = overlay
+            elif overlay.parentWidget() is not button:
+                overlay.setParent(button)
+            button.setMouseTracking(True)
+            overlay.setGeometry(button.rect())
+            if kind == QEvent.Type.MouseMove and isinstance(event, QMouseEvent):
+                pos = event.position().toPoint()
+            else:
+                pos = button.mapFromGlobal(QCursor.pos())
+            overlay.set_cursor(pos)
+            overlay.show()
+            overlay.raise_()
+        elif kind in (QEvent.Type.Leave, QEvent.Type.Hide):
+            overlay = self._active_overlay()
+            if overlay is not None and overlay.parentWidget() is button:
+                overlay.hide()
 
     def _screen_for(self, global_pos):
         screen = QApplication.screenAt(global_pos)
@@ -2827,7 +3069,7 @@ class MainWindow(QMainWindow):
         if not self.isMaximized() and not getattr(self, "_max_toggle_running", False):
             self._normal_geometry = self.geometry()
         width = event.size().width()
-        if hasattr(self, "navigation_panel"):
+        if hasattr(self, "navigation_panel") and not self._uwp_mode:
             should_collapse = width < 1120
             if should_collapse != getattr(self, "navigation_collapsed", False):
                 self.set_navigation_collapsed(should_collapse, animate=True)
@@ -2902,6 +3144,8 @@ class MainWindow(QMainWindow):
             button.setChecked(i == index)
         if index == 1:
             self.on_tab_changed(1)
+        if self._uwp_mode:
+            self._update_nav_icons()
 
     def on_tab_changed(self, index):
         if index == 1:
@@ -2953,6 +3197,9 @@ class MainWindow(QMainWindow):
         return right_widget
 
     def open_settings_dialog(self):
+        overlay = self._active_overlay()
+        if overlay is not None:
+            overlay.hide()
         dialog = SettingsDialog(self)
         dialog.exec()
 
@@ -3381,6 +3628,12 @@ def get_system_accent_color():
     return QColor("#0078D4")
 
 
+def uwp_style_enabled():
+    if os.environ.get("GTAO_UWP") == "1":
+        return True
+    return get_windows_build() < 22000
+
+
 def get_system_theme():
     if sys.platform == "win32":
         try:
@@ -3460,6 +3713,7 @@ THEME_TOKENS = {
 }
 
 CURRENT_THEME = "light"
+CURRENT_ACCENT = QColor("#0078D4")
 
 
 def get_theme_tokens(theme=None):
@@ -3595,11 +3849,18 @@ def build_fluent_stylesheet(theme, accent=None):
     accent = accent_color.name()
     selection = accent_selection_color(accent_color, theme).name()
 
+    button_border = border
+    hover_border = accent
+    checked_border = accent
+    if uwp_style_enabled():
+        button_border = "transparent"
+        hover_border = "transparent"
+        checked_border = "transparent"
     root_background = window
     group_background = surface
 
-    radius = "8px" if get_windows_build() >= 22000 else "3px"
-    nav_radius = "8px" if get_windows_build() >= 22000 else "2px"
+    radius = "3px" if uwp_style_enabled() else "8px"
+    nav_radius = "2px" if uwp_style_enabled() else "8px"
     return f"""
     QWidget {{
         color: {text};
@@ -3639,6 +3900,17 @@ def build_fluent_stylesheet(theme, accent=None):
     #HintLabel {{ color: {secondary}; }}
     QPushButton#NavigationToggle {{ background: transparent; border: none; border-radius: {nav_radius}; padding: 6px; }}
     QPushButton#NavigationToggle:hover {{ background-color: {hover}; }}
+    QPushButton#NavigationTile {{
+        min-height: 50px;
+        max-height: 50px;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 0;
+        padding: 0;
+        text-align: left;
+    }}
+    QPushButton#NavigationTile:hover {{ background: transparent; }}
+    QPushButton#NavigationTile:checked {{ background: transparent; border: 1px solid transparent; }}
     QPushButton#NavigationButton {{ text-align: left; background: transparent; border: 1px solid transparent; border-radius: {nav_radius}; padding: 9px 10px; spacing: 12px; }}
     QPushButton#NavigationButton:hover {{ background-color: {hover}; }}
     QPushButton#NavigationButton:checked {{ background-color: {selection}; border-left: 3px solid {accent}; font-weight: 600; }}
@@ -3661,15 +3933,15 @@ def build_fluent_stylesheet(theme, accent=None):
     QPushButton {{
         color: {text};
         background-color: {surface_alt};
-        border: 1px solid {border};
+        border: 1px solid {button_border};
         border-radius: {radius};
         padding: 7px 14px;
         min-height: 18px;
     }}
-    QPushButton:hover {{ background-color: {hover}; border-color: {accent}; }}
+    QPushButton:hover {{ background-color: {hover}; border-color: {hover_border}; }}
     QPushButton:pressed {{ background-color: {pressed}; }}
-    QPushButton:checked {{ background-color: {selection}; border-color: {accent}; }}
-    QPushButton:disabled {{ color: {disabled}; background-color: {surface}; border-color: {border}; }}
+    QPushButton:checked {{ background-color: {selection}; border-color: {checked_border}; }}
+    QPushButton:disabled {{ color: {disabled}; background-color: {surface}; border-color: {button_border}; }}
     QLineEdit {{
         color: {text}; background-color: {input_bg};
         border: 1px solid {border}; border-radius: {radius};
@@ -3742,13 +4014,14 @@ def build_fluent_stylesheet(theme, accent=None):
 
 
 def apply_theme(app: QApplication, theme):
-    global CURRENT_THEME
+    global CURRENT_THEME, CURRENT_ACCENT
     if theme not in ("light", "dark"):
         theme = "light"
     CURRENT_THEME = theme
 
     build = get_windows_build()
     accent = get_system_accent_color()
+    CURRENT_ACCENT = QColor(accent)
     app.setPalette(build_theme_palette(theme, accent))
     app.setStyleSheet(build_fluent_stylesheet(theme, accent=accent))
     app.setFont(QFont(APP_FONT_FAMILY, 9))
@@ -3771,8 +4044,8 @@ def main():
     clean_temp_dir()
     ensure_persistent_cache()
     set_dll_search_path()
-    QApplication.setQuitOnLastWindowClosed(False)
     app = QApplication(sys.argv)
+    QApplication.setQuitOnLastWindowClosed(False)
     if sys.platform == "win32":
         import ctypes
         try:
