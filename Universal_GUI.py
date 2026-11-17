@@ -18,14 +18,18 @@ from collections import deque, defaultdict
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTableWidget, QTableWidgetItem,
                              QPushButton, QLabel, QMessageBox, QHeaderView,
-                             QTabWidget, QGroupBox, QFormLayout, QLineEdit,
+                             QGroupBox, QFormLayout, QLineEdit,
                              QTextEdit, QComboBox, QDialog, QMenu, QSystemTrayIcon,
-                             QDialogButtonBox, QCheckBox)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QEvent
-from PyQt6.QtGui import QColor, QBrush, QFont, QIcon, QAction
+                             QDialogButtonBox, QCheckBox, QStackedWidget, QFrame, QSizePolicy,
+                             QStyle, QToolButton)
+from PySide6.QtCore import (Qt, QTimer, Signal, QThread, QEvent, QSize, QPoint, QRect,
+                            QPropertyAnimation, QParallelAnimationGroup, QEasingCurve)
+from PySide6.QtGui import (QColor, QBrush, QFont, QIcon, QAction, QGuiApplication, QPalette,
+                           QPainter, QPen, QPixmap, QFontDatabase, QMouseEvent)
+
 
 # ====================== 音效初始化 ======================
 SOUND_HOTKEY_ON = "sounds/hotkey_on.wav"
@@ -136,6 +140,51 @@ def get_icon_path():
         return icon_path
     else:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_filename)
+
+
+# ====================== 字体 ======================
+FONT_FILE = "fonts/GTAVEnhancedSimpChinese-Regular.ttf"
+APP_FONT_FAMILY = "GTAV Enhanced SimpChinese"
+
+
+def init_custom_font():
+    global APP_FONT_FAMILY
+    path = get_resource_path(FONT_FILE)
+    if not os.path.exists(path):
+        print(f"[字体] 未找到字体文件: {path}，将使用系统默认字体")
+        return APP_FONT_FAMILY
+    font_id = QFontDatabase.addApplicationFont(path)
+    if font_id >= 0:
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            APP_FONT_FAMILY = families[0]
+            print(f"[字体] 已加载: {APP_FONT_FAMILY} ({path})")
+            return APP_FONT_FAMILY
+    print(f"[字体] 加载失败: {path}，将使用系统默认字体")
+    return APP_FONT_FAMILY
+
+
+# ====================== 导航图标  ======================
+def nav_glyph_icon(glyph, color, size=20):
+    dpr = 1.0
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        dpr = max(1.0, float(screen.devicePixelRatio()))
+    pixmap = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    font = QFont("Segoe Fluent Icons")
+    if not QFontDatabase.hasFamily("Segoe Fluent Icons"):
+        font = QFont("Segoe MDL2 Assets")
+    font.setPixelSize(max(1, int(round(size * dpr * 0.8))))
+    painter.setFont(font)
+    painter.setPen(QColor(color))
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+    painter.end()
+    pixmap.setDevicePixelRatio(dpr)
+    return QIcon(pixmap)
 
 
 # ====================== DLL 搜索路径设置 ======================
@@ -390,9 +439,10 @@ def get_geo_info(ip):
     ip2_is_chinese = False
     ip2_isp = None
 
-    if ip2region_searcher is not None:
+    searcher = ip2region_searcher
+    if searcher is not None:
         try:
-            region_raw = ip2region_searcher.search(ip)
+            region_raw = searcher.search(ip)
             if region_raw:
                 if isinstance(region_raw, bytes):
                     region_str = decode_ip2region_bytes(region_raw)
@@ -410,10 +460,10 @@ def get_geo_info(ip):
                 def clean(s):
                     return s if s and s not in ("0", "0.0", "未知") else ""
 
-                country = clean(country);
+                country = clean(country)
                 area = clean(area)
-                province = clean(province);
-                city = clean(city);
+                province = clean(province)
+                city = clean(city)
                 isp = clean(isp)
 
                 non_mainland = ["香港", "澳门", "台湾", "Hong Kong", "Macau", "Taiwan"]
@@ -1071,7 +1121,7 @@ class OnDemandBlocker:
 
 # ====================== 进程监控线程 ======================
 class ProcessMonitorThread(QThread):
-    process_exited = pyqtSignal(list)
+    process_exited = Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -1121,8 +1171,8 @@ class ProcessMonitorThread(QThread):
 
 # ====================== 加速器检测线程 ======================
 class AcceleratorTestThread(QThread):
-    output = pyqtSignal(str)
-    finished_signal = pyqtSignal()
+    output = Signal(str)
+    finished_signal = Signal()
 
     def __init__(self, phy_ip, virt_ip):
         super().__init__()
@@ -1270,6 +1320,37 @@ class AcceleratorTestThread(QThread):
 
 
 # ====================== 战局管理器 ======================
+class SnapPreviewWindow(QWidget):
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.WindowTransparentForInput)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setObjectName("SnapPreview")
+
+    def show_preview(self, rect):
+        self._accent = get_system_accent_color()
+        self.setGeometry(rect)
+        self.show()
+        self.raise_()
+
+    def hide_preview(self):
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        accent = getattr(self, "_accent", None) or get_system_accent_color()
+        fill = QColor(accent)
+        fill.setAlpha(48)
+        pen = QPen(accent)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(self.rect().adjusted(3, 3, -3, -3), 10, 10)
+
+
 class SessionManager:
     def __init__(self):
         self.solo_process = None
@@ -1333,9 +1414,9 @@ class SessionManager:
 
 # ====================== 设置对话框 ======================
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main_window = parent
+    def __init__(self, main_window: "MainWindow" = None):
+        super().__init__(main_window)
+        self.main_window = main_window
         self.setWindowTitle("软件设置")
         self.setModal(True)
         self.setFixedWidth(460)
@@ -1390,6 +1471,31 @@ class SettingsDialog(QDialog):
         tip2.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         m_layout.addWidget(tip2)
         layout.addWidget(group_maintain)
+
+        group_about = QGroupBox("关于")
+        about_layout = QVBoxLayout(group_about)
+        about_layout.setSpacing(4)
+        version_label = QLabel("版本号：Public V3.0")
+        about_layout.addWidget(version_label)
+        accent_hex = get_system_accent_color().name()
+        author_label = QLabel(
+            '作者：<a href="https://space.bilibili.com/275185681" '
+            f'style="color:{accent_hex}; text-decoration:none;">@白发飘飘火柴人</a>')
+        author_label.setTextFormat(Qt.TextFormat.RichText)
+        author_label.setOpenExternalLinks(True)
+        author_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        about_layout.addWidget(author_label)
+        repo_url = "https://github.com/FlowingWhiteHairMatchstickMan/GTAO_PC_NetworkChecker"
+        repo_label = QLabel(
+            f'开源地址：<a href="{repo_url}" '
+            f'style="color:{accent_hex}; text-decoration:none;">{repo_url}</a>')
+        repo_label.setTextFormat(Qt.TextFormat.RichText)
+        repo_label.setOpenExternalLinks(True)
+        repo_label.setWordWrap(True)
+        repo_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        about_layout.addWidget(repo_label)
+        layout.addWidget(group_about)
+
         layout.addStretch()
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -1462,6 +1568,16 @@ class SessionControlTab(QWidget):
         except Exception as e:
             print(f"[采集] 异常: {e}")
 
+    # ==================== 主题相关 ====================
+    def apply_running_style(self, label):
+        label.setStyleSheet(f"color: {get_theme_tokens()['success']};")
+
+    def refresh_theme_colors(self):
+        if self.session_manager.solo_running:
+            self.apply_running_style(self.solo_status_label)
+        if self.current_mode in ("v1", "v2"):
+            self.apply_running_style(self.locked_status_label)
+
     # ==================== UI 布局 ====================
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1489,6 +1605,10 @@ class SessionControlTab(QWidget):
         self.locked_stop_btn = QPushButton("停止战局锁")
         self.locked_stop_btn.clicked.connect(self.stop_locked_session)
 
+        for button in (self.solo_start_btn, self.solo_stop_btn, self.locked_start_btn,
+                       self.locked_start_btn_v2, self.locked_stop_btn):
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
         btn_layout.addWidget(self.solo_start_btn)
         btn_layout.addWidget(self.solo_stop_btn)
         btn_layout.addWidget(self.locked_start_btn)
@@ -1508,7 +1628,7 @@ class SessionControlTab(QWidget):
         font = tip_label.font()
         font.setPointSize(9)
         tip_label.setFont(font)
-        tip_label.setStyleSheet("color: gray;")
+        tip_label.setObjectName("HintLabel")
         layout.addWidget(tip_label)
 
     # ==================== 卡单人战局 ====================
@@ -1520,7 +1640,7 @@ class SessionControlTab(QWidget):
         if success:
             self.current_mode = 'solo'
             self.solo_status_label.setText("运行中")
-            self.solo_status_label.setStyleSheet("color: green;")
+            self.apply_running_style(self.solo_status_label)
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 卡单人战局已启动")
             if not bypass_msg:
                 QMessageBox.information(self, "成功", msg)
@@ -1552,7 +1672,7 @@ class SessionControlTab(QWidget):
         if success:
             self.current_mode = 'v1'
             self.locked_status_label.setText("运行中")
-            self.locked_status_label.setStyleSheet("color: green;")
+            self.apply_running_style(self.locked_status_label)
             self.locked_block_count_label.setText("0")
             self.lock_count_timer.start(50)
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 握手包战局锁已启动")
@@ -1564,7 +1684,7 @@ class SessionControlTab(QWidget):
 
     # ==================== 战局锁方式二（异步启动） ====================
     class StartV2Thread(QThread):
-        finished = pyqtSignal(bool, str)
+        finished_v2 = Signal(bool, str)
 
         def __init__(self, parent_tab, bypass_msg=False):
             super().__init__()
@@ -1597,9 +1717,9 @@ class SessionControlTab(QWidget):
                 self.parent_tab.current_mode = 'v2'
                 self.parent_tab.blocked_count_v2 = 0
                 self.parent_tab.last_played_block_count = 0
-                self.finished.emit(True, msg)
+                self.finished_v2.emit(True, msg)
             except Exception as e:
-                self.finished.emit(False, f"启动失败: {e}")
+                self.finished_v2.emit(False, f"启动失败: {e}")
 
     def start_locked_session_v2(self, bypass_msg=False):
         if self.v2_is_starting:
@@ -1622,7 +1742,8 @@ class SessionControlTab(QWidget):
             self.locked_start_btn_v2.setText("启动中...")
 
         self.start_v2_thread = self.StartV2Thread(self, bypass_msg)
-        self.start_v2_thread.finished.connect(lambda s, m: self._on_start_v2_finished(s, m, bypass_msg))
+        self.start_v2_thread.finished_v2.connect(
+            lambda s, m: self._on_start_v2_finished(s, m, bypass_msg))
         self.start_v2_thread.start()
 
     def _on_start_v2_finished(self, success, msg, bypass_msg):
@@ -1632,7 +1753,7 @@ class SessionControlTab(QWidget):
 
         if success:
             self.locked_status_label.setText("运行中")
-            self.locked_status_label.setStyleSheet("color: green;")
+            self.apply_running_style(self.locked_status_label)
             self.locked_block_count_label.setText("0")
             self.lock_count_timer.start(50)
             self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 端点白名单战局锁已启动")
@@ -1745,12 +1866,20 @@ class SessionControlTab(QWidget):
 
 # ====================== 主窗口 ======================
 class MainWindow(QMainWindow):
-    hotkey_signal = pyqtSignal(str)
+    hotkey_signal = Signal(str)
 
     def __init__(self):
         super().__init__()
+        self._opacity_animation = None
+        self._geometry_animation = None
+        self._nav_animation = None
+        self._window_dragging = False
+        self._hiding_to_tray = False
+        self._closing = False
+        self._max_toggle_running = False
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
-        self.resize(1100, 650)
+        self.resize(1280, 760)
         self.load_settings()
         self.driver_available = check_driver_available()
         if not self.driver_available:
@@ -1810,7 +1939,53 @@ class MainWindow(QMainWindow):
         self.block_timer.start(1000)
         self.crash_detection_enabled = False
         self.show_private_ip = False
-        self.show()
+        self._last_system_theme = get_system_theme()
+        self._last_system_accent = QColor(get_system_accent_color())
+        self._theme_timer = QTimer(self)
+        self._theme_timer.timeout.connect(self.refresh_system_theme)
+        self._theme_timer.start(1500)
+        try:
+            QGuiApplication.styleHints().colorSchemeChanged.connect(self.refresh_system_theme)
+        except Exception:
+            pass
+        QTimer.singleShot(180, self._apply_native_chrome)
+        self._fade_in()
+
+    def _apply_native_chrome(self):
+        apply_windows_native_chrome(self, self._last_system_theme)
+        self._enable_native_snap()
+
+    def refresh_system_theme(self, *_args):
+        theme = get_system_theme()
+        accent = get_system_accent_color()
+        old_theme = getattr(self, "_last_system_theme", None)
+        old_accent = getattr(self, "_last_system_accent", None)
+        theme_changed = theme != old_theme
+        accent_changed = old_accent is None or accent.rgba() != old_accent.rgba()
+        if not theme_changed and not accent_changed:
+            return
+
+        self._last_system_theme = theme
+        self._last_system_accent = QColor(accent)
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            apply_theme(app, theme)
+        self._apply_native_chrome()
+        self.refresh_dynamic_colors()
+        changes = []
+        if theme_changed:
+            changes.append(f"主题={theme}")
+        if accent_changed:
+            changes.append(f"强调色={accent.name()}")
+        print(f"[主题] 系统外观已同步: {', '.join(changes)}")
+
+    def refresh_dynamic_colors(self):
+        if hasattr(self, "session_tab"):
+            self.session_tab.refresh_theme_colors()
+        if hasattr(self, "navigation_buttons"):
+            self._update_nav_icons()
+        if hasattr(self, "block_table"):
+            self.update_block_table()
 
     # ====================== 设置与音效 ======================
     def load_settings(self):
@@ -1865,7 +2040,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.tray_icon.setIcon(QIcon(icon_path))
         else:
-            self.tray_icon.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon))
+            self.tray_icon.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
         tray_menu = QMenu(self)
         show_action = QAction("打开程序", self)
         show_action.triggered.connect(self.show_normal)
@@ -1881,9 +2056,43 @@ class MainWindow(QMainWindow):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.show_normal()
 
-    def show_normal(self):
-        self.showNormal()
+    def _animate_opacity(self, start, end, duration=170, on_finished=None):
+        if getattr(self, "_opacity_animation", None) is not None:
+            self._opacity_animation.stop()
+        self.setWindowOpacity(start)
+        animation = QPropertyAnimation(self, b"windowOpacity", self)
+        animation.setDuration(duration)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if on_finished is not None:
+            animation.finished.connect(on_finished)
+        self._opacity_animation = animation
+        animation.start()
+
+    def _fade_in(self, duration=180):
+        self.setWindowOpacity(0.0)
+        self.show()
+        self.raise_()
         self.activateWindow()
+        self._animate_opacity(0.0, 1.0, duration)
+
+    def show_normal(self):
+        if getattr(self, "_hiding_to_tray", False):
+            self._hiding_to_tray = False
+            if getattr(self, "_opacity_animation", None) is not None:
+                self._opacity_animation.stop()
+            self.setWindowOpacity(1.0)
+        was_visible = self.isVisible()
+        if not was_visible:
+            self.setWindowOpacity(0.0)
+        if self.isMaximized():
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.activateWindow()
+        if not was_visible:
+            self._animate_opacity(0.0, 1.0, 180)
 
     def quit_app(self):
         print("[系统] 托盘菜单请求退出")
@@ -1892,19 +2101,31 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange:
             if self.isMinimized() and self.enable_minimize:
-                print("[系统] 最小化到托盘")
-                QTimer.singleShot(0, self.hide)
                 event.ignore()
+                self.minimize_window()
             else:
                 super().changeEvent(event)
 
     def closeEvent(self, event):
+        if getattr(self, "_closing", False):
+            event.accept()
+            return
+        if not self.isVisible():
+            event.accept()
+            self._finalize_close()
+            return
+        self._closing = True
+        event.ignore()
+        self._animate_opacity(self.windowOpacity(), 0.0, 150, self._finalize_close)
+
+    def _finalize_close(self):
         print("[系统] 执行清理资源并彻底退出")
         self.cleanup_resources()
         if hasattr(self, 'tray_icon'):
             self.tray_icon.hide()
-        event.accept()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
         os._exit(0)
 
     # ====================== 快捷键处理 ======================
@@ -2245,17 +2466,15 @@ class MainWindow(QMainWindow):
         os.execl(sys.executable, sys.executable, *sys.argv)
 
     def setup_ui(self):
-        self.tabs = QTabWidget()
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-
         self.monitor_tab = QWidget()
         self.acc_tab = QWidget()
         self.session_tab = SessionControlTab(self)
 
         layout = QVBoxLayout(self.monitor_tab)
+        layout.setContentsMargins(8, 8, 8, 8)
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setFont(QFont("Consolas", 10))
+        self.console.setFont(QFont(APP_FONT_FAMILY, 10))
         layout.addWidget(self.console)
         btn_layout = QHBoxLayout()
         self.crash_btn = QPushButton("挂逼崩溃战局检测")
@@ -2263,31 +2482,426 @@ class MainWindow(QMainWindow):
         self.crash_btn.toggled.connect(self.on_crash_detection_toggled)
         self.refresh_geo_btn = QPushButton("重试未知地理位置")
         self.refresh_geo_btn.clicked.connect(self.on_refresh_geo)
+        self.crash_btn.hide()
+        self.refresh_geo_btn.hide()
         btn_layout.addWidget(self.crash_btn)
         btn_layout.addWidget(self.refresh_geo_btn)
-
-        tip = QLabel(
-            "卡逼判定规则：IP定位位置在国内或距离您物理位置过远，连接比其他玩家速率过大，或对方网络环境未启用upnp被游戏转入中转服务器连接。")
-        tip.setStyleSheet("color: gray;")
+        layout.addLayout(btn_layout)
+        tip = QLabel("卡逼判定规则：IP定位位置在国内或距离您物理位置过远，连接比其他玩家速率过大，或对方网络环境未启用upnp被游戏转入中转服务器连接。")
+        tip.setWordWrap(True)
+        tip.setObjectName("HintLabel")
         layout.addWidget(tip)
-        self.tabs.addTab(self.monitor_tab, "战局IP检测")
 
         self.setup_accelerator_tab()
-        self.tabs.addTab(self.acc_tab, "路由模式加速器检测")
-        self.tabs.addTab(self.session_tab, "网络战局锁")
+        self.page_stack = QStackedWidget()
+        self.page_stack.addWidget(self.monitor_tab)
+        self.page_stack.addWidget(self.acc_tab)
+        self.page_stack.addWidget(self.session_tab)
 
         central = QWidget()
+        central.setObjectName("MainClientArea")
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.addWidget(self.tabs)
-        main_layout.addWidget(left_widget, 3)
-        right_widget = self.create_right_panel()
-        main_layout.addWidget(right_widget, 2)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("IntegratedTitleBar")
+        self.title_bar.setFixedHeight(32)
+        self.title_bar.installEventFilter(self)
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(14, 0, 0, 0)
+        title_layout.setSpacing(0)
+        self.window_title_label = QLabel("GTA 在线模式 & Red Dead 在线模式 战局管理工具")
+        self.window_title_label.setObjectName("WindowTitleLabel")
+        self.window_title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        title_layout.addWidget(self.window_title_label, 1)
+        self.min_button = QToolButton()
+        self.min_button.setObjectName("WindowControlButton")
+        self.min_button.setText("\uE921")
+        self.min_button.setToolTip("最小化")
+        self.min_button.clicked.connect(self.minimize_window)
+        self.max_button = QToolButton()
+        self.max_button.setObjectName("WindowControlButton")
+        self.max_button.setText("\uE922")
+        self.max_button.setToolTip("最大化")
+        self.max_button.clicked.connect(self.toggle_max_restore)
+        self.close_button = QToolButton()
+        self.close_button.setObjectName("WindowCloseButton")
+        self.close_button.setText("\uE8BB")
+        self.close_button.setToolTip("关闭")
+        self.close_button.clicked.connect(self.close)
+        for control in (self.min_button, self.max_button, self.close_button):
+            control.setFixedSize(46, 32)
+            title_layout.addWidget(control)
+        outer.addWidget(self.title_bar)
+
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(10, 4, 10, 4)
+        body_layout.setSpacing(8)
+        outer.addWidget(body, 1)
+        root = body_layout
+
+        self.navigation_panel = QFrame()
+        self.navigation_panel.setObjectName("NavigationPanel")
+        self.navigation_collapsed = False
+        self.navigation_panel.setFixedWidth(240 if get_windows_build() >= 22000 else 220)
+        nav_layout = QVBoxLayout(self.navigation_panel)
+        nav_layout.setContentsMargins(8, 10, 8, 10)
+        nav_layout.setSpacing(5)
+
+        nav_header = QHBoxLayout()
+        self.navigation_toggle = QPushButton()
+        self.navigation_toggle.setObjectName("NavigationToggle")
+        self.navigation_toggle.setFixedSize(38, 38)
+        self.navigation_toggle.setIconSize(QSize(16, 16))
+        self.navigation_toggle.setToolTip("收起导航栏")
+        self.navigation_toggle.clicked.connect(self.toggle_navigation)
+        nav_header.addWidget(self.navigation_toggle)
+        nav_header.addStretch(1)
+        nav_layout.addLayout(nav_header)
+        nav_layout.addSpacing(12)
+
+        self.navigation_buttons = []
+        nav_labels = ["战局 IP 检测", "路由模式加速器检测", "网络战局锁"]
+        for index, label in enumerate(nav_labels):
+            button = QPushButton(label)
+            button.setObjectName("NavigationButton")
+            button.setIconSize(QSize(20, 20))
+            button.setCheckable(True)
+            button.setMinimumHeight(44)
+            button.setToolTip(label)
+            button.clicked.connect(lambda checked=False, i=index: self.switch_navigation_page(i))
+            nav_layout.addWidget(button)
+            self.navigation_buttons.append(button)
+        nav_layout.addStretch(1)
+
+        self.nav_settings_button = QPushButton("软件设置")
+        self.nav_settings_button.setObjectName("NavigationButton")
+        self.nav_settings_button.setIconSize(QSize(20, 20))
+        self.nav_settings_button.setMinimumHeight(44)
+        self.nav_settings_button.setToolTip("软件设置")
+        self.nav_settings_button.clicked.connect(self.open_settings_dialog)
+        nav_layout.addWidget(self.nav_settings_button)
+        self._update_nav_icons()
+
+        content_column = QVBoxLayout()
+        content_column.setContentsMargins(0, 0, 0, 0)
+        content_column.addWidget(self.page_stack, 1)
+        content_host = QWidget()
+        content_host.setLayout(content_column)
+
+        self.right_panel = self.create_right_panel()
+        self.right_panel.setFixedWidth(350)
+        root.addWidget(self.navigation_panel, 0)
+        root.addWidget(content_host, 1)
+        root.addWidget(self.right_panel, 0)
+
         self.status_label = QLabel(
             f"监控IP: {LOCAL_IP} | 端口: {sorted(UDP_PORTS_TO_MONITOR)} | 临时阻断: 0 | 永久黑名单: {len(self.permanent_blacklist)}")
-        self.statusBar().addWidget(self.status_label)
+        self.status_label.setObjectName("StatusInfo")
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.statusBar().addWidget(self.status_label, 1)
+        self.switch_navigation_page(0)
+
+    def _update_nav_icons(self):
+        color = get_theme_tokens()["text"]
+        glyphs = ["\uE701", "\uE8D7", "\uE83D", "\uE713"]
+        buttons = list(self.navigation_buttons) + [self.nav_settings_button]
+        for button, glyph in zip(buttons, glyphs):
+            button.setIcon(nav_glyph_icon(glyph, color))
+            button.setIconSize(QSize(20, 20))
+        self.navigation_toggle.setIcon(nav_glyph_icon(
+            "\uE76C" if self.navigation_collapsed else "\uE76B", color, 16))
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "title_bar", None) and isinstance(event, QMouseEvent):
+            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                self.toggle_max_restore()
+                return True
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._begin_window_drag(event.globalPosition().toPoint())
+                return True
+            if event.type() == QEvent.Type.MouseMove and event.buttons() & Qt.MouseButton.LeftButton:
+                if getattr(self, "_window_dragging", False):
+                    self._update_window_drag(event.globalPosition().toPoint())
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                if getattr(self, "_window_dragging", False):
+                    self._finish_window_drag(event.globalPosition().toPoint())
+                return True
+        return super().eventFilter(watched, event)
+
+    def _screen_for(self, global_pos):
+        screen = QApplication.screenAt(global_pos)
+        return screen or self.screen() or QApplication.primaryScreen()
+
+    def _snap_zone(self, global_pos):
+        screen = self._screen_for(global_pos)
+        if screen is None:
+            return None
+        avail = screen.availableGeometry()
+        margin = 12
+        if global_pos.y() <= avail.top() + margin:
+            return "max"
+        if global_pos.x() <= avail.left() + margin:
+            return "left"
+        if global_pos.x() >= avail.right() - margin:
+            return "right"
+        return None
+
+    def _snap_rect(self, zone, global_pos):
+        screen = self._screen_for(global_pos)
+        avail = screen.availableGeometry()
+        if zone == "max":
+            return QRect(avail)
+        half = avail.width() // 2
+        if zone == "left":
+            return QRect(avail.left(), avail.top(), half, avail.height())
+        return QRect(avail.left() + half, avail.top(), avail.width() - half, avail.height())
+
+    def _begin_window_drag(self, global_pos):
+        if not hasattr(self, "_snap_preview"):
+            self._snap_preview = SnapPreviewWindow()
+        self._drag_start_pos = global_pos
+        self._drag_offset = global_pos - self.frameGeometry().topLeft()
+        self._window_dragging = True
+
+    def _update_window_drag(self, global_pos):
+        if (global_pos - self._drag_start_pos).manhattanLength() < 6:
+            return
+        if self.isMaximized():
+            normal = getattr(self, "_normal_geometry", None)
+            if normal is not None:
+                screen = self._screen_for(global_pos)
+                avail = screen.availableGeometry() if screen else normal
+                ratio = (self._drag_start_pos.x() - avail.left()) / max(1, avail.width())
+                self.setUpdatesEnabled(False)
+                try:
+                    self.showNormal()
+                    self.setGeometry(normal)
+                finally:
+                    self.setUpdatesEnabled(True)
+                self._drag_offset = QPoint(int(normal.width() * ratio), 16)
+        self.move(global_pos - self._drag_offset)
+        zone = self._snap_zone(global_pos)
+        if zone:
+            self._snap_preview.show_preview(self._snap_rect(zone, global_pos))
+        else:
+            self._snap_preview.hide_preview()
+
+    def _finish_window_drag(self, global_pos):
+        self._window_dragging = False
+        if hasattr(self, "_snap_preview"):
+            self._snap_preview.hide_preview()
+        if (global_pos - self._drag_start_pos).manhattanLength() < 6:
+            return
+        zone = self._snap_zone(global_pos)
+        if zone is None:
+            return
+        if zone == "max":
+            if not self.isMaximized():
+                self.toggle_max_restore()
+            return
+        self._animate_geometry(self.geometry(), self._snap_rect(zone, global_pos), 200)
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+                if msg.message == 0x0084:
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    rect = wintypes.RECT()
+                    ctypes.windll.user32.GetWindowRect(int(self.winId()), ctypes.byref(rect))
+                    border = 8
+                    left = x < rect.left + border
+                    right = x >= rect.right - border
+                    top = y < rect.top + border
+                    bottom = y >= rect.bottom - border
+                    if not self.isMaximized():
+                        if top and left: return True, 13
+                        if top and right: return True, 14
+                        if bottom and left: return True, 16
+                        if bottom and right: return True, 17
+                        if left: return True, 10
+                        if right: return True, 11
+                        if top: return True, 12
+                        if bottom: return True, 15
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
+
+    def _animate_geometry(self, start_rect, end_rect, duration=220, on_finished=None):
+        if getattr(self, "_geometry_animation", None) is not None:
+            self._geometry_animation.stop()
+        self.setGeometry(start_rect)
+        animation = QPropertyAnimation(self, b"geometry", self)
+        animation.setDuration(duration)
+        animation.setStartValue(start_rect)
+        animation.setEndValue(end_rect)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if on_finished is not None:
+            animation.finished.connect(on_finished)
+        self._geometry_animation = animation
+        animation.start()
+
+    def toggle_max_restore(self):
+        if getattr(self, "_max_toggle_running", False):
+            return
+        self._max_toggle_running = True
+
+        if self.isMaximized():
+            start_rect = self.geometry()
+            target = getattr(self, "_normal_geometry", None)
+            if target is None:
+                self._max_toggle_running = False
+                self.showNormal()
+                return
+            self.setUpdatesEnabled(False)
+            try:
+                self.showNormal()
+                self.setGeometry(start_rect)
+            finally:
+                self.setUpdatesEnabled(True)
+
+            def finish_restore():
+                self.setGeometry(target)
+                self.max_button.setText("\uE922")
+                self.max_button.setToolTip("最大化")
+                self._max_toggle_running = False
+
+            self._animate_geometry(start_rect, target, 220, finish_restore)
+        else:
+            self._normal_geometry = self.geometry()
+            screen = self.screen() or QApplication.primaryScreen()
+            target = screen.availableGeometry()
+
+            def finish_maximize():
+                self.showMaximized()
+                self.max_button.setText("\uE923")
+                self.max_button.setToolTip("还原")
+                self._max_toggle_running = False
+
+            self._animate_geometry(self.geometry(), target, 220, finish_maximize)
+
+    def _enable_native_snap(self):
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            gwl_style = -16
+            swp_nosize, swp_nomove, swp_nozorder, swp_noactivate, swp_framechanged = (
+                0x0001, 0x0002, 0x0004, 0x0010, 0x0020)
+            style = user32.GetWindowLongW(hwnd, gwl_style)
+            style |= 0x00040000 | 0x00010000 | 0x00020000
+            user32.SetWindowLongW(hwnd, gwl_style, style)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                swp_nosize | swp_nomove | swp_nozorder | swp_noactivate | swp_framechanged)
+            print("[窗口] 已启用原生缩放/贴边吸附")
+        except Exception as e:
+            print(f"[窗口] 启用原生贴边失败: {e}")
+
+    def minimize_window(self):
+        if not self.enable_minimize:
+            self.showMinimized()
+            return
+        if getattr(self, "_hiding_to_tray", False):
+            return
+        print("[系统] 最小化到托盘")
+        self._hiding_to_tray = True
+
+        def finish_hide():
+            self._hiding_to_tray = False
+            self.hide()
+
+        self._animate_opacity(self.windowOpacity(), 0.0, 140, finish_hide)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.isMaximized() and not getattr(self, "_max_toggle_running", False):
+            self._normal_geometry = self.geometry()
+        width = event.size().width()
+        if hasattr(self, "navigation_panel"):
+            should_collapse = width < 1120
+            if should_collapse != getattr(self, "navigation_collapsed", False):
+                self.set_navigation_collapsed(should_collapse, animate=True)
+        if hasattr(self, "max_button"):
+            maximized = self.isMaximized()
+            self.max_button.setText("\uE923" if maximized else "\uE922")
+            self.max_button.setToolTip("还原" if maximized else "最大化")
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self.isMaximized() and not getattr(self, "_max_toggle_running", False):
+            self._normal_geometry = self.geometry()
+
+    def _apply_nav_labels(self, collapsed):
+        labels = ["战局 IP 检测", "路由模式加速器检测", "网络战局锁"]
+        for button, label in zip(self.navigation_buttons, labels):
+            button.setText("" if collapsed else label)
+            button.setToolTip(label)
+            button.setStyleSheet("text-align: center; padding: 9px 0;" if collapsed else "")
+        self.nav_settings_button.setText("" if collapsed else "软件设置")
+        self.nav_settings_button.setToolTip("软件设置")
+        self.nav_settings_button.setStyleSheet(
+            "text-align: center; padding: 9px 0;" if collapsed else "")
+
+    def set_navigation_collapsed(self, collapsed, animate=True):
+        expanded_width = 240 if get_windows_build() >= 22000 else 220
+        collapsed_width = 64 if get_windows_build() >= 22000 else 56
+        target = collapsed_width if collapsed else expanded_width
+        self.navigation_collapsed = collapsed
+
+        if not collapsed:
+            self._apply_nav_labels(False)
+        self.navigation_toggle.setIcon(nav_glyph_icon(
+            "\uE76C" if collapsed else "\uE76B", get_theme_tokens()["text"], 16))
+        self.navigation_toggle.setToolTip("展开导航栏" if collapsed else "收起导航栏")
+
+        if not animate or not self.isVisible():
+            self._apply_nav_labels(collapsed)
+            self.navigation_panel.setFixedWidth(target)
+            return
+        current = self.navigation_panel.width()
+        if current == target:
+            self._apply_nav_labels(collapsed)
+            self.navigation_panel.setFixedWidth(target)
+            return
+        if getattr(self, "_nav_animation", None) is not None:
+            self._nav_animation.stop()
+        self._nav_animation = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            animation = QPropertyAnimation(self.navigation_panel, prop, self)
+            animation.setDuration(180)
+            animation.setStartValue(current)
+            animation.setEndValue(target)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._nav_animation.addAnimation(animation)
+
+        def finish():
+            self.navigation_panel.setFixedWidth(target)
+            self._apply_nav_labels(collapsed)
+
+        self._nav_animation.finished.connect(finish)
+        self._nav_animation.start()
+
+    def toggle_navigation(self):
+        self.set_navigation_collapsed(not self.navigation_collapsed)
+
+    def switch_navigation_page(self, index):
+        if not 0 <= index < 3:
+            return
+        self.page_stack.setCurrentIndex(index)
+        for i, button in enumerate(self.navigation_buttons):
+            button.setChecked(i == index)
+        if index == 1:
+            self.on_tab_changed(1)
 
     def on_tab_changed(self, index):
         if index == 1:
@@ -2313,7 +2927,7 @@ class MainWindow(QMainWindow):
         self.temp_block_btn.clicked.connect(self.on_temp_block_ip)
         temp_block_btn_layout.addWidget(self.temp_block_btn)
         block_layout.addLayout(temp_block_btn_layout)
-        right_layout.addWidget(block_group)
+        right_layout.addWidget(block_group, 1)
 
         blacklist_group = QGroupBox("黑名单设置")
         blacklist_layout = QVBoxLayout(blacklist_group)
@@ -2335,14 +2949,7 @@ class MainWindow(QMainWindow):
         bl_btn_layout.addWidget(self.add_bl_btn)
         bl_btn_layout.addWidget(self.remove_bl_btn)
         blacklist_layout.addLayout(bl_btn_layout)
-        right_layout.addWidget(blacklist_group)
-        settings_group = QGroupBox("软件设置")
-        settings_layout = QVBoxLayout(settings_group)
-        self.settings_btn = QPushButton("打开软件设置")
-        self.settings_btn.setMinimumHeight(35)
-        self.settings_btn.clicked.connect(self.open_settings_dialog)
-        settings_layout.addWidget(self.settings_btn)
-        right_layout.addWidget(settings_group)
+        right_layout.addWidget(blacklist_group, 1)
         return right_widget
 
     def open_settings_dialog(self):
@@ -2354,7 +2961,7 @@ class MainWindow(QMainWindow):
         tip_label = QLabel("注意：此检测功能仅适用于\"路由模式\"的加速器。\n"
                            "如果您使用进程模式加速，将无法检测。")
         tip_label.setWordWrap(True)
-        tip_label.setStyleSheet("color: orange; background-color: #FFF3CD; border: 1px solid #FFEEBA; padding: 5px;")
+        tip_label.setObjectName("AcceleratorWarning")
         layout.addWidget(tip_label)
         info_group = QGroupBox("当前网络接口信息")
         info_layout = QVBoxLayout(info_group)
@@ -2380,7 +2987,7 @@ class MainWindow(QMainWindow):
         output_layout = QVBoxLayout(output_group)
         self.acc_output = QTextEdit()
         self.acc_output.setReadOnly(True)
-        self.acc_output.setFont(QFont("Consolas", 9))
+        self.acc_output.setFont(QFont(APP_FONT_FAMILY, 9))
         output_layout.addWidget(self.acc_output)
         layout.addWidget(output_group)
         self.detect_btn = QPushButton("开始检测加速器")
@@ -2506,20 +3113,26 @@ class MainWindow(QMainWindow):
         blocked = self.blocker.get_blocked()
         self.block_table.setRowCount(len(blocked))
         temp_count = 0
-        perm_count = 0
+        tokens = get_theme_tokens()
         for row, (ip, remaining) in enumerate(blocked.items()):
             display_ip = ip
             self.block_table.setItem(row, 0, QTableWidgetItem(display_ip))
             if remaining == -1:
                 status_text = "永久阻断"
-                status_color = QColor(255, 100, 100)
-                perm_count += 1
+                status_bg = tokens["block_perm_bg"]
+                status_fg = tokens["block_perm_text"]
             else:
                 status_text = f"临时阻断 ({remaining}秒)"
-                status_color = QColor(255, 200, 100) if remaining <= 10 else QColor(255, 255, 200)
+                if remaining <= 10:
+                    status_bg = tokens["block_expire_bg"]
+                    status_fg = tokens["block_expire_text"]
+                else:
+                    status_bg = tokens["block_temp_bg"]
+                    status_fg = tokens["block_temp_text"]
                 temp_count += 1
             status_item = QTableWidgetItem(status_text)
-            status_item.setBackground(QBrush(status_color))
+            status_item.setBackground(QBrush(QColor(status_bg)))
+            status_item.setForeground(QBrush(QColor(status_fg)))
             self.block_table.setItem(row, 1, status_item)
             if remaining == -1:
                 unblock_btn = QPushButton("解除永久")
@@ -2579,7 +3192,7 @@ class MainWindow(QMainWindow):
         for ip in unknown_ips:
             if ip in geo_cache:
                 del geo_cache[ip]
-            location, isp, is_chinese, server_type = get_geo_info(ip)
+            location, isp, is_chinese, server_type, using_fallback = get_geo_info(ip)
             with data_lock:
                 peer = peers_map.get(ip)
                 if peer:
@@ -2588,6 +3201,7 @@ class MainWindow(QMainWindow):
                     peer.isp = isp
                     peer.is_chinese = is_chinese
                     peer.server_type = server_type
+                    peer.using_fallback = using_fallback
                     if location != old_loc:
                         updated = True
             time.sleep(0.05)
@@ -2606,7 +3220,7 @@ class MainWindow(QMainWindow):
         for ip in unknown_ips:
             if ip in geo_cache:
                 del geo_cache[ip]
-            location, isp, is_chinese, server_type = get_geo_info(ip)
+            location, isp, is_chinese, server_type, using_fallback = get_geo_info(ip)
             with data_lock:
                 peer = peers_map.get(ip)
                 if peer:
@@ -2614,6 +3228,7 @@ class MainWindow(QMainWindow):
                     peer.isp = isp
                     peer.is_chinese = is_chinese
                     peer.server_type = server_type
+                    peer.using_fallback = using_fallback
                     count += 1
             time.sleep(0.05)
         self.refresh_display()
@@ -2720,263 +3335,424 @@ class MainWindow(QMainWindow):
         self.detect_btn.setText("开始检测加速器")
 
 
-# ====================== 系统主题检测 ======================
-def get_system_theme():
+# ====================== Windows DWM 原生窗口外观 / Fluent 系统主题 ======================
+def get_windows_build():
     if sys.platform != "win32":
-        return "light"
+        return 0
     try:
         import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        )
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                 r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            value, _ = winreg.QueryValueEx(key, "CurrentBuildNumber")
+            return int(value)
+        finally:
             winreg.CloseKey(key)
-            return "dark" if value == 0 else "light"
-        except:
-            return "light"
-    except:
-        return "light"
+    except Exception:
+        try:
+            return int(sys.getwindowsversion().build)
+        except Exception:
+            return 0
 
 
-def apply_theme(app, theme):
-    if theme == "dark":
-        dark_style = """
-        QWidget {
-            background-color: #1e1e1e;
-            color: #ffffff;
-        }
-        QMainWindow {
-            background-color: #1e1e1e;
-        }
-        QTextEdit {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
-        }
-        QTextEdit:read-only {
-            background-color: #252526;
-        }
-        QPushButton {
-            background-color: #3d3d3d;
-            color: #ffffff;
-            border: 1px solid #555555;
-            border-radius: 4px;
-            padding: 5px 10px;
-        }
-        QPushButton:hover {
-            background-color: #4d4d4d;
-            border-color: #666666;
-        }
-        QPushButton:pressed {
-            background-color: #2d2d2d;
-        }
-        QPushButton:disabled {
-            background-color: #2d2d2d;
-            color: #666666;
-        }
-        QPushButton:checked {
-            background-color: #4a4a4a;
-            border-color: #0078d4;
-        }
-        QPushButton:checked:hover {
-            background-color: #5a5a5a;
-        }
-        QTableWidget {
-            background-color: #252526;
-            color: #d4d4d4;
-            gridline-color: #3d3d3d;
-            border: 1px solid #3d3d3d;
-        }
-        QTableWidget::item {
-            background-color: #252526;
-        }
-        QTableWidget::item:selected {
-            background-color: #0078d4;
-            color: #ffffff;
-        }
-        QHeaderView::section {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
-            padding: 4px;
-        }
-        QGroupBox {
-            color: #ffffff;
-            border: 1px solid #3d3d3d;
-            border-radius: 5px;
-            margin-top: 10px;
-            padding-top: 10px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px 0 5px;
-        }
-        QLabel {
-            color: #d4d4d4;
-        }
-        QCheckBox {
-            color: #d4d4d4;
-        }
-        QCheckBox::indicator {
-            width: 18px;
-            height: 18px;
-        }
-        QCheckBox::indicator:unchecked {
-            background-color: #3d3d3d;
-            border: 1px solid #555555;
-            border-radius: 3px;
-        }
-        QCheckBox::indicator:unchecked:hover {
-            background-color: #4d4d4d;
-        }
-        QCheckBox::indicator:checked {
-            background-color: #0078d4;
-            border: 1px solid #0078d4;
-            border-radius: 3px;
-        }
-        QCheckBox::indicator:checked:hover {
-            background-color: #1a8ad4;
-        }
-        QComboBox {
-            background-color: #3d3d3d;
-            color: #d4d4d4;
-            border: 1px solid #555555;
-            border-radius: 4px;
-            padding: 5px;
-        }
-        QComboBox:hover {
-            border-color: #666666;
-        }
-        QComboBox::drop-down {
-            border: none;
-        }
-        QComboBox QAbstractItemView {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            selection-background-color: #0078d4;
-            selection-color: #ffffff;
-        }
-        QTabWidget::pane {
-            border: 1px solid #3d3d3d;
-            background-color: #1e1e1e;
-        }
-        QTabBar::tab {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            padding: 8px 15px;
-            border: 1px solid #3d3d3d;
-            border-bottom: none;
-            margin-right: 2px;
-        }
-        QTabBar::tab:selected {
-            background-color: #3d3d3d;
-            color: #ffffff;
-            border-bottom: 2px solid #0078d4;
-        }
-        QTabBar::tab:hover {
-            background-color: #4d4d4d;
-        }
-        QLineEdit {
-            background-color: #3d3d3d;
-            color: #d4d4d4;
-            border: 1px solid #555555;
-            border-radius: 4px;
-            padding: 5px;
-        }
-        QLineEdit:focus {
-            border-color: #0078d4;
-        }
-        QScrollBar:vertical {
-            background-color: #2d2d2d;
-            width: 12px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:vertical {
-            background-color: #555555;
-            min-height: 20px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background-color: #666666;
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            height: 0;
-        }
-        QScrollBar:horizontal {
-            background-color: #2d2d2d;
-            height: 12px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:horizontal {
-            background-color: #555555;
-            min-width: 20px;
-            border-radius: 6px;
-        }
-        QScrollBar::handle:horizontal:hover {
-            background-color: #666666;
-        }
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-            width: 0;
-        }
-        QMenuBar {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-        }
-        QMenuBar::item:selected {
-            background-color: #3d3d3d;
-        }
-        QMenu {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
-        }
-        QMenu::item:selected {
-            background-color: #0078d4;
-            color: #ffffff;
-        }
-        QStatusBar {
-            background-color: #1e1e1e;
-            color: #d4d4d4;
-        }
-        QToolTip {
-            background-color: #2d2d2d;
-            color: #d4d4d4;
-            border: 1px solid #3d3d3d;
-        }
-        QDialog {
-            background-color: #1e1e1e;
-        }
-        QMessageBox {
-            background-color: #1e1e1e;
-        }
-        """
-        app.setStyleSheet(dark_style)
-        print("[主题] 应用深色主题")
-    else:
-        light_style = """
-        QTextEdit:read-only {
-            background-color: #f8f8f8;
-        }
-        QTableWidget::item:selected {
-            background-color: #0078d4;
-            color: #ffffff;
-        }
-        QGroupBox {
-            border: 1px solid #d0d0d0;
-            border-radius: 5px;
-            margin-top: 10px;
-            padding-top: 10px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px 0 5px;
-        }
-        """
-        app.setStyleSheet(light_style)
-        print("[主题] 应用浅色主题")
+def get_system_accent_color():
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\DWM"
+            )
+            try:
+                try:
+                    value, _ = winreg.QueryValueEx(key, "AccentColor")
+                    value = int(value)
+                    return QColor(value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF)
+                except OSError:
+                    value, _ = winreg.QueryValueEx(key, "ColorizationColor")
+                    value = int(value)
+                    return QColor((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+            finally:
+                winreg.CloseKey(key)
+        except Exception:
+            pass
+    return QColor("#0078D4")
 
+
+def get_system_theme():
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            )
+            try:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            finally:
+                winreg.CloseKey(key)
+            return "dark" if int(value) == 0 else "light"
+        except Exception:
+            pass
+
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        try:
+            palette = app.palette()
+            return "dark" if palette.color(QPalette.ColorRole.Window).lightness() < 128 else "light"
+        except Exception:
+            pass
+    return "light"
+
+
+# ====================== 主题色板 ======================
+THEME_TOKENS = {
+    "light": {
+        "window": "#F3F3F3",
+        "surface": "#FFFFFF",
+        "surface_alt": "#F8F8F8",
+        "input_bg": "#FFFFFF",
+        "text": "#202020",
+        "secondary": "#666666",
+        "border": "#E1E1E1",
+        "hover": "#EEEEEE",
+        "pressed": "#E5E5E5",
+        "disabled": "#A0A0A0",
+        "success": "#0F7B0F",
+        "warning_bg": "#FFF4CE",
+        "warning_border": "#E7C86A",
+        "warning_text": "#6B4E00",
+        "caption_hover": "rgba(0, 0, 0, 0.06)",
+        "caption_pressed": "rgba(0, 0, 0, 0.10)",
+        "block_perm_bg": "#FDE7E9",
+        "block_perm_text": "#8E1B1B",
+        "block_temp_bg": "#FFF4CE",
+        "block_temp_text": "#6B4E00",
+        "block_expire_bg": "#FFE3B0",
+        "block_expire_text": "#7A3E00",
+    },
+    "dark": {
+        "window": "#242424",
+        "surface": "#2B2B2B",
+        "surface_alt": "#333333",
+        "input_bg": "#292929",
+        "text": "#F5F5F5",
+        "secondary": "#B8B8B8",
+        "border": "#454545",
+        "hover": "#3A3A3A",
+        "pressed": "#414141",
+        "disabled": "#777777",
+        "success": "#6CCB5F",
+        "warning_bg": "#3A3220",
+        "warning_border": "#5B4C26",
+        "warning_text": "#F3D98C",
+        "caption_hover": "rgba(255, 255, 255, 0.08)",
+        "caption_pressed": "rgba(255, 255, 255, 0.12)",
+        "block_perm_bg": "#43272A",
+        "block_perm_text": "#FFB4B4",
+        "block_temp_bg": "#3A3320",
+        "block_temp_text": "#F3D98C",
+        "block_expire_bg": "#4A3418",
+        "block_expire_text": "#FFC978",
+    },
+}
+
+CURRENT_THEME = "light"
+
+
+def get_theme_tokens(theme=None):
+    if theme is None:
+        theme = CURRENT_THEME
+    return THEME_TOKENS["dark" if theme == "dark" else "light"]
+
+
+def _mix_color(source, target, ratio):
+    ratio = max(0.0, min(1.0, float(ratio)))
+    return QColor(
+        int(round(source.red() * ratio + target.red() * (1 - ratio))),
+        int(round(source.green() * ratio + target.green() * (1 - ratio))),
+        int(round(source.blue() * ratio + target.blue() * (1 - ratio))),
+    )
+
+
+def accent_selection_color(accent_color, theme):
+    tokens = get_theme_tokens(theme)
+    ratio = 0.68 if theme == "dark" else 0.24
+    base = QColor(tokens["window"] if theme == "dark" else "#FFFFFF")
+    return _mix_color(accent_color, base, ratio)
+
+
+def build_theme_palette(theme, accent=None):
+    tokens = get_theme_tokens(theme)
+    accent_color = QColor(accent) if accent is not None else QColor("#0078D4")
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(tokens["window"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(tokens["text"]))
+    palette.setColor(QPalette.ColorRole.Base, QColor(tokens["input_bg"]))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(tokens["surface_alt"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(tokens["text"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(tokens["surface_alt"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(tokens["text"]))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.Highlight, accent_selection_color(accent_color, theme))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(tokens["text"]))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(tokens["surface"]))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(tokens["text"]))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(tokens["secondary"]))
+    palette.setColor(QPalette.ColorRole.Link, accent_color)
+    if hasattr(QPalette.ColorRole, "Accent"):
+        palette.setColor(QPalette.ColorRole.Accent, accent_color)
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text,
+                 QPalette.ColorRole.ButtonText, QPalette.ColorRole.PlaceholderText):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(tokens["disabled"]))
+    return palette
+
+
+def _dwm_set_window_attribute(dwmapi, hwnd, attribute, value, value_type):
+    import ctypes
+    payload = value_type(value)
+    result = dwmapi.DwmSetWindowAttribute(
+        hwnd,
+        ctypes.c_uint(attribute),
+        ctypes.byref(payload),
+        ctypes.sizeof(payload),
+    )
+    return result == 0, int(result)
+
+
+def apply_windows_native_chrome(window, theme):
+    if sys.platform != "win32":
+        return False
+
+    build = get_windows_build()
+    if build < 17763:
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd_value = int(window.winId())
+        hwnd = wintypes.HWND(hwnd_value)
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+        dwmapi.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD
+        ]
+        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+        dark = 1 if theme == "dark" else 0
+        failed = []
+        dark_ok = False
+        corner_ok = False
+
+        dark_ok, hr = _dwm_set_window_attribute(dwmapi, hwnd, 20, dark, ctypes.c_int)
+        if not dark_ok and build < 22000:
+            dark_ok, hr = _dwm_set_window_attribute(dwmapi, hwnd, 19, dark, ctypes.c_int)
+        if not dark_ok:
+            failed.append(f"immersive-dark=0x{hr & 0xFFFFFFFF:08X}")
+
+        if build >= 22000:
+            corner_ok, hr = _dwm_set_window_attribute(dwmapi, hwnd, 33, 2, ctypes.c_uint32)
+            if not corner_ok:
+                failed.append(f"rounded-corners=0x{hr & 0xFFFFFFFF:08X}")
+            for attr, label in ((34, "border-default"), (35, "caption-default"), (36, "text-default")):
+                ok, hr = _dwm_set_window_attribute(dwmapi, hwnd, attr, 0xFFFFFFFF, ctypes.c_uint32)
+                if not ok:
+                    failed.append(f"{label}=0x{hr & 0xFFFFFFFF:08X}")
+
+        print(
+            f"[DWM] 原生外观 | build={build} | HWND=0x{hwnd_value:X} | "
+            f"dark-titlebar={'OK' if dark_ok else 'system-default'} | "
+            f"rounded={'OK' if corner_ok else 'N/A'}"
+        )
+        if failed:
+            print(f"[DWM] 部分 DWM 属性不可用: {'; '.join(failed)}")
+        return dark_ok or corner_ok
+    except Exception as e:
+        print(f"[DWM] 原生窗口外观初始化失败: {e}")
+        return False
+
+
+def build_fluent_stylesheet(theme, accent=None):
+    tokens = get_theme_tokens(theme)
+    window = tokens["window"]
+    surface = tokens["surface"]
+    surface_alt = tokens["surface_alt"]
+    input_bg = tokens["input_bg"]
+    text = tokens["text"]
+    secondary = tokens["secondary"]
+    border = tokens["border"]
+    hover = tokens["hover"]
+    pressed = tokens["pressed"]
+    disabled = tokens["disabled"]
+    warning_bg = tokens["warning_bg"]
+    warning_border = tokens["warning_border"]
+    warning_text = tokens["warning_text"]
+    caption_hover = tokens["caption_hover"]
+    caption_pressed = tokens["caption_pressed"]
+    accent_color = QColor(accent) if accent is not None else QColor("#0078D4")
+    accent = accent_color.name()
+    selection = accent_selection_color(accent_color, theme).name()
+
+    root_background = window
+    group_background = surface
+
+    radius = "8px" if get_windows_build() >= 22000 else "3px"
+    nav_radius = "8px" if get_windows_build() >= 22000 else "2px"
+    return f"""
+    QWidget {{
+        color: {text};
+        font-family: "{APP_FONT_FAMILY}", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+        font-size: 9pt;
+        selection-background-color: {selection};
+        selection-color: {text};
+    }}
+    QMainWindow {{ background-color: {root_background}; }}
+    #MainClientArea, QStackedWidget {{ background-color: transparent; border: none; }}
+    #NavigationPanel {{ background-color: transparent; border: none; border-radius: 0; }}
+    #IntegratedTitleBar {{ background-color: transparent; border: none; }}
+    #WindowTitleLabel {{ font-size: 9pt; font-weight: 400; }}
+    QToolButton#WindowControlButton {{
+        color: {text};
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+        font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+        font-size: 10px;
+    }}
+    QToolButton#WindowControlButton:hover {{ background-color: {caption_hover}; }}
+    QToolButton#WindowControlButton:pressed {{ background-color: {caption_pressed}; }}
+    QToolButton#WindowCloseButton {{
+        color: {text};
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+        font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+        font-size: 10px;
+    }}
+    QToolButton#WindowCloseButton:hover {{ color: #FFFFFF; background-color: #C42B1C; }}
+    QToolButton#WindowCloseButton:pressed {{ color: #FFFFFF; background-color: #B22A1A; }}
+    #StatusInfo {{ color: {secondary}; padding: 3px 6px; }}
+    #HintLabel {{ color: {secondary}; }}
+    QPushButton#NavigationToggle {{ background: transparent; border: none; border-radius: {nav_radius}; padding: 6px; }}
+    QPushButton#NavigationToggle:hover {{ background-color: {hover}; }}
+    QPushButton#NavigationButton {{ text-align: left; background: transparent; border: 1px solid transparent; border-radius: {nav_radius}; padding: 9px 10px; spacing: 12px; }}
+    QPushButton#NavigationButton:hover {{ background-color: {hover}; }}
+    QPushButton#NavigationButton:checked {{ background-color: {selection}; border-left: 3px solid {accent}; font-weight: 600; }}
+    QDialog {{ background-color: {window}; }}
+    #EmbeddedSettingsPage {{ background-color: transparent; }}
+    QGroupBox {{
+        background-color: {group_background};
+        color: {text};
+        border: 1px solid {border};
+        border-radius: {radius};
+        margin-top: 13px;
+        padding: 12px 9px 8px 9px;
+        font-weight: 600;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 6px;
+    }}
+    QPushButton {{
+        color: {text};
+        background-color: {surface_alt};
+        border: 1px solid {border};
+        border-radius: {radius};
+        padding: 7px 14px;
+        min-height: 18px;
+    }}
+    QPushButton:hover {{ background-color: {hover}; border-color: {accent}; }}
+    QPushButton:pressed {{ background-color: {pressed}; }}
+    QPushButton:checked {{ background-color: {selection}; border-color: {accent}; }}
+    QPushButton:disabled {{ color: {disabled}; background-color: {surface}; border-color: {border}; }}
+    QLineEdit {{
+        color: {text}; background-color: {input_bg};
+        border: 1px solid {border}; border-radius: {radius};
+        padding: 7px 9px; min-height: 18px;
+    }}
+    QLineEdit:focus {{ border: 2px solid {accent}; padding: 6px 8px; }}
+    QTextEdit {{
+        color: {text}; background-color: {input_bg};
+        border: 1px solid {border}; border-radius: {radius}; padding: 7px;
+    }}
+    QTableWidget {{
+        color: {text}; background-color: {surface};
+        alternate-background-color: {surface_alt};
+        gridline-color: {border}; border: 1px solid {border};
+        border-radius: {radius}; selection-background-color: {selection};
+        selection-color: {text}; outline: 0;
+    }}
+    QTableWidget::item {{ padding: 5px 7px; border: none; }}
+    QTableWidget::item:hover {{ background-color: {hover}; }}
+    QHeaderView::section {{
+        color: {text}; background-color: {surface_alt};
+        border: none; border-bottom: 1px solid {border};
+        padding: 8px 7px; font-weight: 600;
+    }}
+    QCheckBox {{ color: {text}; spacing: 8px; }}
+    QTableCornerButton::section {{
+        background-color: {surface_alt}; border: 1px solid {border};
+    }}
+    QLabel#AcceleratorWarning {{
+        color: {warning_text};
+        background-color: {warning_bg};
+        border: 1px solid {warning_border};
+        border-radius: {radius};
+        padding: 8px 10px;
+    }}
+    QTabWidget::pane {{
+        background-color: {surface}; border: 1px solid {border}; border-radius: {radius};
+        top: -1px;
+    }}
+    QTabBar::tab {{
+        color: {secondary}; background-color: transparent;
+        border: 1px solid transparent; border-radius: 6px;
+        padding: 8px 16px; margin: 3px 3px 5px 0;
+    }}
+    QTabBar::tab:selected {{ color: {text}; background-color: {selection}; border-color: {border}; }}
+    QTabBar::tab:hover:!selected {{ color: {text}; background-color: {hover}; }}
+    QComboBox {{
+        color: {text}; background-color: {input_bg};
+        border: 1px solid {border}; border-radius: {radius}; padding: 6px 9px;
+    }}
+    QComboBox:hover {{ border-color: {accent}; }}
+    QComboBox QAbstractItemView {{
+        color: {text}; background-color: {surface};
+        selection-background-color: {selection}; border: 1px solid {border};
+    }}
+    QMenu {{ color: {text}; background-color: {surface}; border: 1px solid {border}; border-radius: {radius}; padding: 5px; }}
+    QMenu::item {{ padding: 7px 28px 7px 10px; border-radius: 4px; }}
+    QMenu::item:selected {{ color: {text}; background-color: {selection}; }}
+    QStatusBar {{ color: {secondary}; background-color: {surface_alt}; border-top: 1px solid {border}; }}
+    QToolTip {{ color: {text}; background-color: {surface}; border: 1px solid {border}; padding: 5px 7px; }}
+    QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
+    QScrollBar::handle:vertical {{ background: {border}; min-height: 26px; border-radius: 5px; }}
+    QScrollBar::handle:vertical:hover {{ background: {secondary}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar:horizontal {{ background: transparent; height: 12px; margin: 2px; }}
+    QScrollBar::handle:horizontal {{ background: {border}; min-width: 26px; border-radius: 5px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {secondary}; }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    """
+
+
+def apply_theme(app: QApplication, theme):
+    global CURRENT_THEME
+    if theme not in ("light", "dark"):
+        theme = "light"
+    CURRENT_THEME = theme
+
+    build = get_windows_build()
+    accent = get_system_accent_color()
+    app.setPalette(build_theme_palette(theme, accent))
+    app.setStyleSheet(build_fluent_stylesheet(theme, accent=accent))
+    app.setFont(QFont(APP_FONT_FAMILY, 9))
+    print(f"[主题] Fluent {'深色' if theme == 'dark' else '浅色'}主题已应用 | build={build}")
 
 def clean_temp_dir():
     if getattr(sys, 'frozen', False):
@@ -3007,6 +3783,7 @@ def main():
                 sys.exit(1)
         except:
             pass
+    init_custom_font()
     theme = get_system_theme()
     apply_theme(app, theme)
     icon_path = get_icon_path()
@@ -3025,7 +3802,6 @@ def main():
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
