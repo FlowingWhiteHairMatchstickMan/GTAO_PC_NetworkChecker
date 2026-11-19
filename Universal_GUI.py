@@ -1012,24 +1012,27 @@ class OnDemandBlocker:
             except:
                 pass
 
-        if self.process and self.process.is_alive():
-            def wait_for_process():
-                try:
+        if self.process is not None:
+            try:
+                if self.process.is_alive():
                     self.process.join(timeout)
-                    if self.process.is_alive():
-                        self.process.terminate()
-                        self.process.join(0.3)
-                except Exception as e:
-                    print(f"[阻断] 停止进程时出错: {e}")
-                finally:
-                    self.process = None
-                    self.cmd_queue = None
-                    self._stop_check_thread()
-                    print("[阻断] 阻断进程已停止")
-
-            threading.Thread(target=wait_for_process, daemon=True).start()
+                if self.process.is_alive():
+                    self.process.terminate()
+                    self.process.join(0.5)
+                if self.process.is_alive():
+                    try:
+                        self.process.kill()
+                    except AttributeError:
+                        pass
+                    self.process.join(0.5)
+            except Exception as e:
+                print(f"[阻断] 停止进程时出错: {e}")
+            finally:
+                self.process = None
+                self.cmd_queue = None
+                self._stop_check_thread()
+                print("[阻断] 阻断进程已停止")
         else:
-            self.process = None
             self.cmd_queue = None
             self._stop_check_thread()
             print("[阻断] 阻断进程已停止")
@@ -1492,9 +1495,15 @@ class SessionManager:
         if not self.solo_running:
             return False, "卡单人战局未运行"
         self.solo_running = False
-        if self.solo_process and self.solo_process.is_alive():
-            self.solo_process.terminate()
-            self.solo_process.join(0.5)
+        proc = self.solo_process
+        if proc is not None:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(1.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(0.5)
+            self.solo_process = None
         return True, "卡单人战局已停止"
 
     def start_locked_session(self):
@@ -1517,9 +1526,15 @@ class SessionManager:
         if not self.locked_running:
             return False, "战局锁未运行"
         self.locked_running = False
-        if self.locked_process and self.locked_process.is_alive():
-            self.locked_process.terminate()
-            self.locked_process.join(0.5)
+        proc = self.locked_process
+        if proc is not None:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(1.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(0.5)
+            self.locked_process = None
         self.locked_counter = None
         return True, "战局锁已停止"
 
@@ -1593,7 +1608,7 @@ class SettingsDialog(QDialog):
         group_about = QGroupBox("关于")
         about_layout = QVBoxLayout(group_about)
         about_layout.setSpacing(4)
-        version_label = QLabel("版本号：Public V3.0")
+        version_label = QLabel("版本号：Public V3.1")
         about_layout.addWidget(version_label)
         accent_hex = get_system_accent_color().name()
         author_label = QLabel(
@@ -1914,9 +1929,13 @@ class SessionControlTab(QWidget):
                     QMessageBox.warning(self, "警告", msg)
                 return
         elif self.current_mode == 'v2':
-            if self.filter_process_v2 and self.filter_process_v2.is_alive():
-                self.filter_process_v2.terminate()
-                self.filter_process_v2.join(0.5)
+            if self.filter_process_v2 is not None:
+                if self.filter_process_v2.is_alive():
+                    self.filter_process_v2.terminate()
+                    self.filter_process_v2.join(1.0)
+                if self.filter_process_v2.is_alive():
+                    self.filter_process_v2.kill()
+                    self.filter_process_v2.join(0.5)
             self.filter_process_v2 = None
             self.msg_queue_v2 = None
             self.blocked_count_v2 = 0
@@ -1994,6 +2013,7 @@ class MainWindow(QMainWindow):
         self._window_dragging = False
         self._hiding_to_tray = False
         self._closing = False
+        self._finalized = False
         self._max_toggle_running = False
         self._uwp_mode = sys.platform == "win32" and uwp_style_enabled()
         self._uwp_expanded = False
@@ -2244,8 +2264,17 @@ class MainWindow(QMainWindow):
         self._animate_opacity(self.windowOpacity(), 0.0, 150, self._finalize_close)
 
     def _finalize_close(self):
+        if getattr(self, '_finalized', False):
+            return
+        self._finalized = True
         print("[系统] 执行清理资源并彻底退出")
         self.cleanup_resources()
+        self._terminate_residual_children()
+        try:
+            import multiprocessing.util as mp_util
+            mp_util._exit_function()
+        except Exception:
+            pass
         if hasattr(self, 'tray_icon'):
             self.tray_icon.hide()
         app = QApplication.instance()
@@ -3536,6 +3565,10 @@ class MainWindow(QMainWindow):
             self.hotkey_thread.running = False
         self.proc_monitor.stop()
         self.proc_monitor.wait(1)
+        start_thread = getattr(self.session_tab, 'start_v2_thread', None)
+        if start_thread is not None and start_thread.isRunning():
+            start_thread.terminate()
+            start_thread.wait(1000)
         if hasattr(self.session_tab, 'lock_count_timer'):
             self.session_tab.lock_count_timer.stop()
         self.session_tab.session_manager.stop_all()
@@ -3544,13 +3577,61 @@ class MainWindow(QMainWindow):
             self.session_tab.stop_locked_session(bypass_msg=True)
         elif getattr(self.session_tab, 'current_mode', None) == 'solo':
             self.session_tab.stop_solo_session(bypass_msg=True)
+        filter_v2 = getattr(self.session_tab, 'filter_process_v2', None)
+        if filter_v2 is not None:
+            if filter_v2.is_alive():
+                filter_v2.terminate()
+                filter_v2.join(1.0)
+            self.session_tab.filter_process_v2 = None
         if hasattr(self, 'acc_test_thread') and self.acc_test_thread.isRunning():
             self.acc_test_thread.stop()
             self.acc_test_thread.wait(1)
         self.blocker.stop()
-        if self.blocker.process and self.blocker.process.is_alive():
+        if self.blocker.process is not None and self.blocker.process.is_alive():
             self.blocker.process.terminate()
             self.blocker.process.join(1.0)
+
+    def _terminate_residual_children(self):
+        for _ in range(3):
+            children = multiprocessing.active_children()
+            if not children:
+                return
+            for child in children:
+                try:
+                    child.terminate()
+                except Exception:
+                    pass
+            for child in children:
+                try:
+                    child.join(1.0)
+                except Exception:
+                    pass
+            for child in children:
+                try:
+                    if child.is_alive():
+                        child.kill()
+                        child.join(0.5)
+                except Exception:
+                    pass
+        remaining = [child.pid for child in multiprocessing.active_children()]
+        if remaining:
+            print(f"[退出] 仍有残留子进程: {remaining}")
+        try:
+            children = psutil.Process().children(recursive=True)
+            for child in children:
+                try:
+                    child.terminate()
+                except Exception:
+                    pass
+            _, alive = psutil.wait_procs(children, timeout=1.0)
+            for child in alive:
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+            psutil.wait_procs(alive, timeout=0.5)
+        except Exception:
+            pass
 
     def on_detect_accelerator(self):
         if not self.driver_available:
